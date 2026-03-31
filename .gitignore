@@ -1,0 +1,68 @@
+# Secrets & credentials
+.env
+
+# Databases & runtime data
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pth
+
+# Output/data files
+*.csv
+outputs/
+results/
+scanner_results/
+fallback_data/
+data/
+logs/
+models/
+
+# Windows personal folders
+AppData/
+OneDrive/
+Downloads/
+Music/
+Videos/
+Contacts/
+Favorites/
+Links/
+Saved Games/
+Searches/
+Documents/
+Pictures/
+
+# Windows system files
+NTUSER*
+ntuser*
+*.TM.blf
+*.regtrans-ms
+unnamed.jpg
+
+# VS Code editor folder
+.vscode/
+
+# Personal/unrelated tools
+.lunarclient/
+.matplotlib/
+.ollama/
+ollama
+curseforge/
+.python_history
+.gitconfig
+.copilot/
+
+# Configs with embedded API keys
+marketmate_config.json
+market_ai_config.json
+
+# Runtime/user data configs
+config/users.json
+config/session.json
+
+# Misc
+Untitled-1.txt

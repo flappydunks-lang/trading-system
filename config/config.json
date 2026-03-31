@@ -1,0 +1,13 @@
+{
+  "account_size": 100000.0,
+  "risk_per_trade": 5.0,
+  "max_positions": 3,
+  "enable_notifications": true,
+  "phone_number": "6693504691",
+  "schwab_futures_enabled": false,
+  "schwab_setup_shown": true,
+  "anthropic_api_key": "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",
+  "groq_api_key": "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",
+  "finnhub_api_key": "d61bs79r01quq5pfo880d61bs79r01quq5pfo88g",
+  "newsdata_api_key": "pub_3ee9ca0ce4004b92b145e0c8ff3308ea"
+}

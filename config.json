@@ -1,0 +1,24 @@
+{
+    "ai_name": "MarketBot",
+    "scan_frequency_minutes": 15,
+    "markets": [
+        "stocks",
+        "crypto",
+        "futures",
+        "indexes",
+        "options"
+    ],
+    "watchlists": {
+        "pltr, gld, msft, smci": {
+            "tickers": [
+                "MSFT",
+                "PLTR",
+                "GLD",
+                "SMCI"
+            ],
+            "trade_type": "long_term"
+        }
+    },
+    "confidence_threshold": 75,
+    "alert_mode": "top3"
+}

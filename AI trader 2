@@ -1,0 +1,790 @@
+"""
+PROFESSIONAL TRADING DASHBOARD - FREE VERSION
+- Web Dashboard with Live Charts
+- Desktop Alerts
+- Multi-Timeframe Analysis (Swing/Long-term trading)
+- Machine Learning Signals
+- Buy/Sell Visual Markers
+- Uses FREE yfinance data (15-min delay - perfect for swing trading!)
+
+Install:
+pip install yfinance pandas numpy scikit-learn scipy flask plotly plyer
+"""
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from flask import Flask, render_template_string, request
+import plotly.graph_objs as go
+import plotly.io as pio
+from threading import Thread
+import time
+from plyer import notification
+import warnings
+warnings.filterwarnings('ignore')
+
+class TradingDashboard:
+    """
+    Professional trading dashboard - FREE version
+    - Perfect for swing trading and long-term investing
+    - 15-min delay is fine for these strategies
+    """
+    
+    def __init__(self, portfolio_value=10000):
+        self.portfolio_value = portfolio_value
+        self.watchlist = []
+        self.signals = {}
+        self.last_alert = {}
+        
+        print(f"\n{'='*90}")
+    print(f"✅ SYSTEM ACTIVE")
+    print(f"{'='*90}")
+    print(f"🌐 Dashboard URL: http://127.0.0.1:5000")
+    print(f"📊 Trading Mode: {mode.upper()}")
+    print(f"🔔 Desktop Alerts: ENABLED")
+    print(f"⏱️  Update Interval: {interval} seconds")
+    print(f"\n💡 OPEN THIS IN YOUR BROWSER: http://127.0.0.1:5000")
+    print(f"{'='*90}\n")
+    
+    # Start monitoring
+    try:
+        dashboard.monitor_watchlist(mode, interval)
+    except KeyboardInterrupt:
+        print("\n\n✅ System stopped. Goodbye!")
+*90}")
+        print(f"🚀 PROFESSIONAL TRADING DASHBOARD - FREE VERSION")
+        print(f"{'='*90}")
+        print(f"💰 Portfolio: ${portfolio_value:,.2f}")
+        print(f"📊 Data: yfinance (FREE)")
+        print(f"✅ Perfect for Swing & Long-term Trading")
+        print(f"✅ Dashboard starting...")
+        print(f"✅ Alert system active")
+        print(f"{'='*90}\n")
+    
+    def get_stock_data(self, symbol, period='1y', interval='1d'):
+        """Get stock data from yfinance (FREE)"""
+        try:
+            ticker = yf.Ticker(symbol)
+            data = ticker.history(period=period, interval=interval)
+            
+            if len(data) < 50:
+                print(f"⚠️  Insufficient data for {symbol}")
+                return None
+            
+            return data
+        except Exception as e:
+            print(f"❌ Error fetching {symbol}: {e}")
+            return None
+    
+    def get_current_price(self, symbol):
+        """Get current price"""
+        try:
+            ticker = yf.Ticker(symbol)
+            data = ticker.history(period='1d', interval='1m')
+            if len(data) > 0:
+                return data['Close'].iloc[-1]
+            
+            # Fallback to daily
+            data = ticker.history(period='2d')
+            return data['Close'].iloc[-1]
+        except:
+            return None
+    
+    def calculate_indicators(self, data):
+        """Calculate technical indicators"""
+        df = data.copy()
+        
+        # EMAs
+        for period in [8, 13, 21, 50, 100, 200]:
+            df[f'EMA_{period}'] = df['Close'].ewm(span=period, adjust=False).mean()
+        
+        # RSI
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # MACD
+        df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+        df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = df['EMA_12'] - df['EMA_26']
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        
+        # ATR
+        high_low = df['High'] - df['Low']
+        high_close = abs(df['High'] - df['Close'].shift())
+        low_close = abs(df['Low'] - df['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        df['ATR'] = true_range.rolling(14).mean()
+        
+        # Bollinger Bands
+        df['BB_Mid'] = df['Close'].rolling(20).mean()
+        bb_std = df['Close'].rolling(20).std()
+        df['BB_Upper'] = df['BB_Mid'] + (bb_std * 2)
+        df['BB_Lower'] = df['BB_Mid'] - (bb_std * 2)
+        
+        # Volume
+        df['Volume_MA'] = df['Volume'].rolling(20).mean()
+        df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
+        
+        return df
+    
+    def generate_signal(self, symbol, mode='swing'):
+        """Generate buy/sell signal with ML"""
+        
+        # Set parameters based on mode
+        if mode == 'swing':
+            period = '6mo'
+            interval = '1h'
+            hold_days = 5
+            return_threshold = 0.03  # 3% gain target
+        else:  # long-term
+            period = '2y'
+            interval = '1d'
+            hold_days = 20
+            return_threshold = 0.05  # 5% gain target
+        
+        data = self.get_stock_data(symbol, period=period, interval=interval)
+        if data is None or len(data) < 100:
+            return None
+        
+        df = self.calculate_indicators(data)
+        
+        # Prepare features for ML
+        feature_cols = ['RSI', 'MACD', 'MACD_Hist', 'ATR', 'Volume_Ratio', 'EMA_21', 'EMA_50']
+        
+        # Create feature dataframe
+        df_features = df[feature_cols + ['Close']].copy()
+        df_features = df_features.dropna()
+        
+        if len(df_features) < 100:
+            return None
+        
+        # Create target (future return)
+        df_features['Future_Return'] = df_features['Close'].shift(-hold_days) / df_features['Close'] - 1
+        df_features['Target'] = (df_features['Future_Return'] > return_threshold).astype(int)
+        df_features = df_features.dropna()
+        
+        if len(df_features) < 100:
+            return None
+        
+        # Train ML model
+        split = int(len(df_features) * 0.8)
+        X_train = df_features[feature_cols].iloc[:split]
+        y_train = df_features['Target'].iloc[:split]
+        X_current = df_features[feature_cols].iloc[-1:]
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_current_scaled = scaler.transform(X_current)
+        
+        # Train model
+        model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        model.fit(X_train_scaled, y_train)
+        
+        # Get prediction
+        probability = model.predict_proba(X_current_scaled)[0, 1]
+        
+        # Get current values
+        current_price = self.get_current_price(symbol)
+        if current_price is None:
+            current_price = df['Close'].iloc[-1]
+        
+        latest = df.iloc[-1]
+        rsi = latest['RSI']
+        macd = latest['MACD']
+        macd_signal = latest['MACD_Signal']
+        atr = latest['ATR']
+        volume_ratio = latest['Volume_Ratio']
+        
+        # Generate signal with multiple confirmations
+        signal_type = 'HOLD'
+        confidence = probability * 100
+        reasons = []
+        
+        # ML says buy
+        if probability >= 0.70:
+            signal_type = 'BUY'
+            reasons.append(f'ML Confidence: {probability*100:.1f}%')
+        
+        # RSI oversold
+        if rsi < 35:
+            if signal_type != 'SELL':
+                signal_type = 'BUY'
+            reasons.append(f'RSI Oversold ({rsi:.1f})')
+            confidence = max(confidence, 65)
+        
+        # RSI overbought
+        elif rsi > 75:
+            signal_type = 'SELL'
+            reasons.append(f'RSI Overbought ({rsi:.1f})')
+            confidence = max(confidence, 70)
+        
+        # MACD crossover
+        prev_macd = df['MACD'].iloc[-2]
+        prev_signal = df['MACD_Signal'].iloc[-2]
+        
+        if macd > macd_signal and prev_macd <= prev_signal:
+            if signal_type != 'SELL':
+                signal_type = 'BUY'
+            reasons.append('MACD Bullish Cross')
+        elif macd < macd_signal and prev_macd >= prev_signal:
+            signal_type = 'SELL'
+            reasons.append('MACD Bearish Cross')
+        
+        # Trend confirmation
+        if latest['EMA_21'] > latest['EMA_50']:
+            reasons.append('Uptrend (EMA 21 > 50)')
+        else:
+            reasons.append('Downtrend (EMA 21 < 50)')
+        
+        # Volume confirmation
+        if volume_ratio > 1.5:
+            reasons.append(f'High Volume ({volume_ratio:.1f}x avg)')
+        
+        # Calculate risk metrics
+        stop_loss = current_price - (atr * 2.5)
+        take_profit_1 = current_price + (atr * 2)
+        take_profit_2 = current_price + (atr * 3)
+        
+        risk_per_share = current_price - stop_loss
+        max_risk = self.portfolio_value * 0.01  # 1% risk
+        position_size = int(max_risk / risk_per_share) if risk_per_share > 0 else 0
+        
+        # Don't exceed 20% of portfolio
+        max_position = self.portfolio_value * 0.20
+        if position_size * current_price > max_position:
+            position_size = int(max_position / current_price)
+        
+        return {
+            'symbol': symbol,
+            'mode': mode,
+            'signal': signal_type,
+            'confidence': confidence,
+            'price': current_price,
+            'rsi': rsi,
+            'macd': macd,
+            'macd_signal': macd_signal,
+            'volume_ratio': volume_ratio,
+            'stop_loss': stop_loss,
+            'take_profit_1': take_profit_1,
+            'take_profit_2': take_profit_2,
+            'position_size': position_size,
+            'risk_amount': risk_per_share * position_size,
+            'potential_profit': (take_profit_2 - current_price) * position_size,
+            'risk_reward': (take_profit_2 - current_price) / risk_per_share if risk_per_share > 0 else 0,
+            'reasons': reasons,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'data': df
+        }
+    
+    def create_chart(self, signal_data):
+        """Create interactive chart with buy/sell markers"""
+        if signal_data is None:
+            return None
+        
+        df = signal_data['data'].tail(100)
+        
+        # Candlestick
+        candlestick = go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name='Price',
+            increasing_line_color='#00ff00',
+            decreasing_line_color='#ff0000'
+        )
+        
+        # EMAs
+        ema_21 = go.Scatter(
+            x=df.index,
+            y=df['EMA_21'],
+            name='EMA 21',
+            line=dict(color='cyan', width=2)
+        )
+        
+        ema_50 = go.Scatter(
+            x=df.index,
+            y=df['EMA_50'],
+            name='EMA 50',
+            line=dict(color='orange', width=2)
+        )
+        
+        # Bollinger Bands
+        bb_upper = go.Scatter(
+            x=df.index,
+            y=df['BB_Upper'],
+            name='BB Upper',
+            line=dict(color='gray', width=1, dash='dash'),
+            opacity=0.5
+        )
+        
+        bb_lower = go.Scatter(
+            x=df.index,
+            y=df['BB_Lower'],
+            name='BB Lower',
+            line=dict(color='gray', width=1, dash='dash'),
+            opacity=0.5,
+            fill='tonexty'
+        )
+        
+        # Signal marker
+        current_price = signal_data['price']
+        current_time = df.index[-1]
+        
+        if signal_data['signal'] == 'BUY':
+            marker_color = '#00ff00'
+            marker_text = '🟢 BUY'
+        elif signal_data['signal'] == 'SELL':
+            marker_color = '#ff0000'
+            marker_text = '🔴 SELL'
+        else:
+            marker_color = '#ffaa00'
+            marker_text = '⚪ HOLD'
+        
+        signal_marker = go.Scatter(
+            x=[current_time],
+            y=[current_price],
+            mode='markers+text',
+            name=f'{signal_data["signal"]} Signal',
+            marker=dict(
+                color=marker_color,
+                size=25,
+                line=dict(color='white', width=3),
+                symbol='circle'
+            ),
+            text=[marker_text],
+            textposition='top center',
+            textfont=dict(size=14, color='white', family='Arial Black')
+        )
+        
+        # Stop loss and take profit lines
+        stop_line = go.Scatter(
+            x=[df.index[-20], current_time],
+            y=[signal_data['stop_loss'], signal_data['stop_loss']],
+            mode='lines',
+            name='Stop Loss',
+            line=dict(color='red', width=2, dash='dot'),
+            showlegend=True
+        )
+        
+        tp1_line = go.Scatter(
+            x=[df.index[-20], current_time],
+            y=[signal_data['take_profit_1'], signal_data['take_profit_1']],
+            mode='lines',
+            name='Take Profit 1',
+            line=dict(color='green', width=2, dash='dot'),
+            showlegend=True
+        )
+        
+        tp2_line = go.Scatter(
+            x=[df.index[-20], current_time],
+            y=[signal_data['take_profit_2'], signal_data['take_profit_2']],
+            mode='lines',
+            name='Take Profit 2',
+            line=dict(color='lightgreen', width=2, dash='dot'),
+            showlegend=True
+        )
+        
+        # Layout
+        title_text = f"{signal_data['symbol']} | {signal_data['signal']} ({signal_data['confidence']:.0f}% confidence)"
+        
+        layout = go.Layout(
+            title=dict(text=title_text, font=dict(size=20, color='white')),
+            xaxis=dict(title='Date', gridcolor='#333'),
+            yaxis=dict(title='Price ($)', gridcolor='#333'),
+            hovermode='x unified',
+            template='plotly_dark',
+            height=600,
+            showlegend=True,
+            legend=dict(x=0.01, y=0.99)
+        )
+        
+        fig = go.Figure(
+            data=[candlestick, bb_lower, bb_upper, ema_21, ema_50, 
+                  stop_line, tp1_line, tp2_line, signal_marker],
+            layout=layout
+        )
+        
+        return pio.to_html(fig, full_html=False)
+    
+    def send_alert(self, signal_data):
+        """Send desktop notification"""
+        symbol = signal_data['symbol']
+        signal = signal_data['signal']
+        
+        # Only alert on strong signals
+        if signal not in ['BUY', 'SELL'] or signal_data['confidence'] < 65:
+            return
+        
+        # Prevent spam
+        now = time.time()
+        alert_key = f"{symbol}_{signal}"
+        if alert_key in self.last_alert:
+            if now - self.last_alert[alert_key] < 1800:  # 30 minutes
+                return
+        
+        self.last_alert[alert_key] = now
+        
+        # Create alert
+        emoji = "🟢" if signal == 'BUY' else "🔴"
+        title = f"{emoji} {signal} SIGNAL: {symbol}"
+        
+        message = f"Price: ${signal_data['price']:.2f}\n"
+        message += f"Confidence: {signal_data['confidence']:.0f}%\n"
+        message += f"Stop Loss: ${signal_data['stop_loss']:.2f}\n"
+        message += f"Target: ${signal_data['take_profit_2']:.2f}\n"
+        message += f"Position: {signal_data['position_size']} shares"
+        
+        try:
+            notification.notify(
+                title=title,
+                message=message,
+                app_name='Trading Dashboard',
+                timeout=15
+            )
+        except:
+            pass
+        
+        # Console alert
+        print(f"\n{'='*90}")
+        print(f"{emoji} {title}")
+        print(f"{'='*90}")
+        print(message)
+        for reason in signal_data['reasons']:
+            print(f"  • {reason}")
+        print(f"{'='*90}\n")
+    
+    def monitor_watchlist(self, mode='swing', interval=300):
+        """Monitor watchlist and send alerts"""
+        print(f"\n🔍 Monitoring {len(self.watchlist)} stocks ({mode} trading)...")
+        print(f"📊 Update interval: {interval} seconds")
+        print(f"🔔 Desktop alerts enabled\n")
+        
+        while True:
+            for symbol in self.watchlist:
+                try:
+                    signal = self.generate_signal(symbol, mode)
+                    if signal:
+                        self.signals[symbol] = signal
+                        self.send_alert(signal)
+                except Exception as e:
+                    print(f"⚠️  Error monitoring {symbol}: {e}")
+                
+                time.sleep(2)  # Small delay between stocks
+            
+            time.sleep(interval)
+
+# Flask Web Dashboard
+app = Flask(__name__)
+dashboard = None
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Trading Dashboard - FREE Version</title>
+    <meta http-equiv="refresh" content="60">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1a2e 100%);
+            color: white;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            padding: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+            margin-top: 10px;
+        }
+        .timestamp {
+            margin-top: 15px;
+            opacity: 0.8;
+            font-size: 1.1em;
+        }
+        .mode-selector {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .mode-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 35px;
+            margin: 0 10px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: bold;
+            transition: all 0.3s;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .mode-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        .signals-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+        .signal-card {
+            background: rgba(30, 33, 39, 0.9);
+            padding: 25px;
+            border-radius: 15px;
+            border-left: 6px solid;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            transition: transform 0.3s;
+        }
+        .signal-card:hover {
+            transform: translateY(-5px);
+        }
+        .signal-card.buy { border-color: #00ff00; }
+        .signal-card.sell { border-color: #ff0000; }
+        .signal-card.hold { border-color: #ffaa00; }
+        
+        .symbol {
+            font-size: 2.2em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .signal-badge {
+            font-size: 1.8em;
+            padding: 8px 20px;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            display: inline-block;
+        }
+        .buy-badge { background: #00ff00; color: #000; }
+        .sell-badge { background: #ff0000; color: #fff; }
+        .hold-badge { background: #ffaa00; color: #000; }
+        
+        .confidence {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            opacity: 0.9;
+        }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-size: 1.1em;
+        }
+        .metric-label {
+            opacity: 0.8;
+        }
+        .metric-value {
+            font-weight: bold;
+        }
+        .reasons {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+        }
+        .reason-item {
+            padding: 8px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+        .reason-item:before {
+            content: "•";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-size: 1.5em;
+        }
+        .chart-container {
+            background: rgba(30, 33, 39, 0.9);
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        .positive { color: #00ff00; }
+        .negative { color: #ff0000; }
+        .neutral { color: #ffaa00; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 Professional Trading Dashboard</h1>
+        <div class="subtitle">🆓 FREE Version - Perfect for Swing & Long-term Trading</div>
+        <div class="timestamp">{{ timestamp }}</div>
+    </div>
+    
+    <div class="mode-selector">
+        <button class="mode-btn" onclick="window.location.href='/?mode=swing'">
+            🔄 Swing Trading (Hold 2-7 Days)
+        </button>
+        <button class="mode-btn" onclick="window.location.href='/?mode=longterm'">
+            📈 Long-Term (Hold Weeks/Months)
+        </button>
+    </div>
+    
+    <div class="signals-grid">
+        {% for signal in signals %}
+        <div class="signal-card {{ signal.signal.lower() }}">
+            <div class="symbol">{{ signal.symbol }}</div>
+            <div class="signal-badge {{ signal.signal.lower() }}-badge">
+                {{ signal.signal }}
+            </div>
+            <div class="confidence">Confidence: {{ "%.0f"|format(signal.confidence) }}%</div>
+            
+            <div class="metric">
+                <span class="metric-label">Current Price:</span>
+                <span class="metric-value">${{ "%.2f"|format(signal.price) }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">RSI:</span>
+                <span class="metric-value">{{ "%.1f"|format(signal.rsi) }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Stop Loss:</span>
+                <span class="metric-value negative">${{ "%.2f"|format(signal.stop_loss) }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Take Profit:</span>
+                <span class="metric-value positive">${{ "%.2f"|format(signal.take_profit_2) }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Position Size:</span>
+                <span class="metric-value">{{ signal.position_size }} shares</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Risk:Reward:</span>
+                <span class="metric-value">1:{{ "%.1f"|format(signal.risk_reward) }}</span>
+            </div>
+            
+            <div class="reasons">
+                <strong>📋 Analysis:</strong>
+                {% for reason in signal.reasons %}
+                <div class="reason-item">{{ reason }}</div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    {% for chart in charts %}
+    <div class="chart-container">
+        {{ chart|safe }}
+    </div>
+    {% endfor %}
+</body>
+</html>
+"""
+
+@app.route('/')
+def show_dashboard():
+    mode = request.args.get('mode', 'swing')
+    
+    signals = []
+    charts = []
+    
+    for symbol in dashboard.watchlist:
+        signal = dashboard.generate_signal(symbol, mode)
+        if signal:
+            signals.append(signal)
+            chart = dashboard.create_chart(signal)
+            if chart:
+                charts.append(chart)
+    
+    return render_template_string(
+        DASHBOARD_HTML,
+        signals=signals,
+        charts=charts,
+        timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S %p')
+    )
+
+def run_web_dashboard():
+    """Start web dashboard"""
+    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+
+# ============================================================================
+# MAIN PROGRAM
+# ============================================================================
+
+if __name__ == "__main__":
+    print("""
+    ╔════════════════════════════════════════════════════════════════════════════╗
+    ║          PROFESSIONAL TRADING DASHBOARD - FREE VERSION                     ║
+    ║                                                                            ║
+    ║  ✅ Web Dashboard with Beautiful Charts                                   ║
+    ║  ✅ Desktop Alert Notifications                                           ║
+    ║  ✅ Machine Learning Signals                                              ║
+    ║  ✅ Buy/Sell Visual Markers (Green/Red Circles)                           ║
+    ║  ✅ Risk Management (Stop Loss, Take Profit, Position Sizing)             ║
+    ║  ✅ 100% FREE (uses yfinance)                                             ║
+    ║                                                                            ║
+    ║  💡 Perfect for Swing Trading & Long-term Investing                       ║
+    ║  ⚠️  15-min data delay (not suitable for day trading)                     ║
+    ╚════════════════════════════════════════════════════════════════════════════╝
+    """)
+    
+    portfolio = float(input("\n💰 Enter Portfolio Value ($): ") or "10000")
+    
+    dashboard = TradingDashboard(portfolio)
+    
+    # Get watchlist
+    print("\n📋 Enter stocks to monitor (comma-separated)")
+    print("Examples: AAPL,MSFT,NVDA,TSLA,GOOGL,AMD,META")
+    print("Recommended: 5-10 stocks max")
+    watchlist_input = input("\nWatchlist: ").strip().upper()
+    dashboard.watchlist = [s.strip() for s in watchlist_input.split(',')]
+    
+    print(f"\n✅ Monitoring: {', '.join(dashboard.watchlist)}")
+    
+    # Choose mode
+    print("\n📊 Select trading style:")
+    print("1. 🔄 Swing Trading (hold 2-7 days)")
+    print("2. 📈 Long-term Investing (hold weeks/months)")
+    
+    mode_choice = input("\nChoice (1/2): ").strip()
+    
+    if mode_choice == '1':
+        mode = 'swing'
+        interval = 300  # 5 minutes
+        print("\n✅ Swing Trading Mode - Analyzing hourly patterns")
+    else:
+        mode = 'longterm'
+        interval = 600  # 10 minutes
+        print("\n✅ Long-term Mode - Analyzing daily patterns")
+    
+    # Start dashboard
+    print("\n🚀 Starting web dashboard...")
+    dashboard_thread = Thread(target=run_web_dashboard, daemon=True)
+    dashboard_thread.start()
+    
+    time.sleep(3)
+    
+    print(f"\n{'='

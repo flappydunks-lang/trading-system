@@ -1,0 +1,694 @@
+"""
+ULTIMATE MARKET AI — Real-time Scanner + Telegram/Discord + NewsAPI + EDGAR
+Optimized single-file integrated system.
+
+Before running:
+ - pip install yfinance requests textblob ta matplotlib aiohttp
+ - Set environment variables or edit CONFIG below:
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DISCORD_WEBHOOK_URL, NEWSAPI_KEY
+ - Use a descriptive SEC_USER_AGENT (email/contact) for EDGAR requests.
+"""
+
+import os
+import time
+import json
+import asyncio
+import aiohttp
+import sqlite3
+import yfinance as yf
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+import matplotlib
+matplotlib.use('Agg')  # Non-GUI backend for better performance
+import matplotlib.pyplot as plt
+from textblob import TextBlob
+import ta
+
+# -------------------------
+# CONFIG
+# -------------------------
+CONFIG = {
+    # Notification
+    "TELEGRAM_TOKEN": os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN"),
+    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID"),
+    "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
+
+    # Data APIs
+    "NEWSAPI_KEY": os.getenv("NEWSAPI_KEY", ""),
+    "SEC_USER_AGENT": os.getenv("SEC_USER_AGENT", "your-email@example.com"),
+    
+    # Scanning settings
+    "SCAN_INTERVAL_SECONDS": int(os.getenv("SCAN_INTERVAL_SECONDS", "300")),
+    "ALERT_CONFIDENCE_THRESHOLD": float(os.getenv("ALERT_CONFIDENCE_THRESHOLD", "0.75")),
+    "TOP_N_SIGNALS": int(os.getenv("TOP_N_SIGNALS", "3")),
+    "CHARTS_FOLDER": os.getenv("CHARTS_FOLDER", "charts"),
+    
+    # Performance settings
+    "MAX_WORKERS": int(os.getenv("MAX_WORKERS", "10")),
+    "REQUEST_TIMEOUT": int(os.getenv("REQUEST_TIMEOUT", "15")),
+    "BATCH_SIZE": int(os.getenv("BATCH_SIZE", "5")),
+    "ENABLE_CACHE": os.getenv("ENABLE_CACHE", "true").lower() == "true",
+    "CACHE_TTL_SECONDS": int(os.getenv("CACHE_TTL_SECONDS", "300")),
+}
+
+os.makedirs(CONFIG["CHARTS_FOLDER"], exist_ok=True)
+
+# -------------------------
+# CACHE SYSTEM
+# -------------------------
+class SimpleCache:
+    """In-memory cache with TTL support"""
+    def __init__(self, ttl_seconds=300):
+        self.cache = {}
+        self.ttl = ttl_seconds
+    
+    def get(self, key):
+        if not CONFIG["ENABLE_CACHE"]:
+            return None
+        if key in self.cache:
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return value
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key, value):
+        if CONFIG["ENABLE_CACHE"]:
+            self.cache[key] = (value, time.time())
+    
+    def clear(self):
+        self.cache.clear()
+
+cache = SimpleCache(CONFIG["CACHE_TTL_SECONDS"])
+
+# -------------------------
+# DATABASE & WATCHLISTS (Optimized)
+# -------------------------
+DB_PATH = "ultimate_ai_realtime.db"
+
+class WatchlistManager:
+    def __init__(self, db_path=DB_PATH):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
+        self.conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes
+        self.cur = self.conn.cursor()
+        self._init_db()
+
+    def _init_db(self):
+        self.cur.executescript("""
+        CREATE TABLE IF NOT EXISTS watchlists (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            asset_type TEXT DEFAULT 'stock',
+            scan_scope TEXT DEFAULT 'short-term',
+            UNIQUE(name, ticker)
+        );
+        CREATE INDEX IF NOT EXISTS idx_watchlist_name ON watchlists(name);
+        CREATE INDEX IF NOT EXISTS idx_ticker ON watchlists(ticker);
+        
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY,
+            time TEXT NOT NULL,
+            watchlist TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_alert_time ON alerts(time);
+        CREATE INDEX IF NOT EXISTS idx_alert_ticker ON alerts(ticker);
+        """)
+        self.conn.commit()
+
+    def add_asset(self, watchlist, ticker, asset_type="stock", scan_scope="short-term"):
+        try:
+            self.cur.execute(
+                "INSERT OR IGNORE INTO watchlists (name, ticker, asset_type, scan_scope) VALUES (?,?,?,?)",
+                (watchlist, ticker.upper(), asset_type, scan_scope)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding asset {ticker}: {e}")
+            return False
+
+    def list_watchlists(self):
+        cache_key = "watchlists_list"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        self.cur.execute("SELECT DISTINCT name FROM watchlists")
+        result = [r[0] for r in self.cur.fetchall()]
+        cache.set(cache_key, result)
+        return result
+
+    def get_assets(self, watchlist):
+        cache_key = f"watchlist_{watchlist}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        self.cur.execute(
+            "SELECT ticker, asset_type, scan_scope FROM watchlists WHERE name=?", 
+            (watchlist,)
+        )
+        result = [(r[0], r[1], r[2]) for r in self.cur.fetchall()]
+        cache.set(cache_key, result)
+        return result
+
+    def log_alert(self, watchlist, ticker, confidence, reason):
+        try:
+            self.cur.execute(
+                "INSERT INTO alerts (time, watchlist, ticker, confidence, reason) VALUES (?,?,?,?,?)",
+                (datetime.utcnow().isoformat(), watchlist, ticker, confidence, reason)
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error logging alert: {e}")
+
+    def get_recent_alerts(self, limit=50):
+        self.cur.execute(
+            "SELECT time, watchlist, ticker, confidence, reason FROM alerts ORDER BY id DESC LIMIT ?", 
+            (limit,)
+        )
+        return self.cur.fetchall()
+
+# -------------------------
+# DATA FETCHERS (Optimized)
+# -------------------------
+class StockFetcher:
+    """Optimized stock data fetcher with caching and batch support"""
+    
+    @staticmethod
+    def fetch(ticker, period="3mo", interval="1d"):
+        cache_key = f"stock_{ticker}_{period}_{interval}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        
+        try:
+            df = yf.download(ticker, period=period, interval=interval, progress=False, threads=False)
+            if df.empty:
+                cache.set(cache_key, None)
+                return None
+            df = df.dropna()
+            cache.set(cache_key, df)
+            return df
+        except Exception as e:
+            print(f"Stock fetch error for {ticker}: {e}")
+            cache.set(cache_key, None)
+            return None
+    
+    @staticmethod
+    def fetch_batch(tickers, period="3mo", interval="1d"):
+        """Fetch multiple tickers in parallel"""
+        results = {}
+        with ThreadPoolExecutor(max_workers=CONFIG["MAX_WORKERS"]) as executor:
+            future_to_ticker = {
+                executor.submit(StockFetcher.fetch, ticker, period, interval): ticker 
+                for ticker in tickers
+            }
+            for future in as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    results[ticker] = future.result()
+                except Exception as e:
+                    print(f"Error fetching {ticker}: {e}")
+                    results[ticker] = None
+        return results
+
+class CryptoFetcher(StockFetcher):
+    pass
+
+class NewsAPIFetcher:
+    """Async news fetcher for better performance"""
+    
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://newsapi.org/v2/everything"
+    
+    async def fetch_headlines_async(self, query, page_size=5, session=None):
+        if not self.api_key:
+            return []
+        
+        cache_key = f"news_{query}_{page_size}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        params = {
+            "q": query, 
+            "pageSize": page_size, 
+            "sortBy": "relevancy", 
+            "language": "en", 
+            "apiKey": self.api_key
+        }
+        
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+        
+        try:
+            async with session.get(
+                self.base_url, 
+                params=params, 
+                timeout=aiohttp.ClientTimeout(total=CONFIG["REQUEST_TIMEOUT"])
+            ) as response:
+                j = await response.json()
+                if j.get("status") == "ok":
+                    headlines = [
+                        f"{a.get('title', '')} — {(a.get('source') or {}).get('name', '')}" 
+                        for a in j.get("articles", [])
+                    ]
+                    cache.set(cache_key, headlines)
+                    return headlines
+        except Exception as e:
+            print(f"NewsAPI fetch error for {query}: {e}")
+        finally:
+            if close_session:
+                await session.close()
+        
+        return []
+    
+    def fetch_headlines(self, query, page_size=5):
+        """Sync wrapper for async method"""
+        return asyncio.run(self.fetch_headlines_async(query, page_size))
+
+# -------------------------
+# SEC EDGAR FETCHER (Optimized)
+# -------------------------
+class EdgarFetcher:
+    """
+    Optimized EDGAR fetcher with caching and async support.
+    """
+    
+    COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+    SUBMISSIONS_URL_TEMPLATE = "https://data.sec.gov/submissions/CIK{}.json"
+    
+    def __init__(self):
+        self.headers = {
+            "User-Agent": CONFIG["SEC_USER_AGENT"], 
+            "Accept-Encoding": "gzip, deflate"
+        }
+        self.ticker_to_cik = {}
+        self._load_company_tickers()
+    
+    @lru_cache(maxsize=1)
+    def _load_company_tickers(self):
+        """Load and cache ticker-to-CIK mapping"""
+        cache_key = "sec_ticker_map"
+        cached = cache.get(cache_key)
+        if cached:
+            self.ticker_to_cik = cached
+            return
+        
+        try:
+            r = requests.get(
+                self.COMPANY_TICKERS_URL, 
+                headers=self.headers, 
+                timeout=CONFIG["REQUEST_TIMEOUT"]
+            )
+            j = r.json()
+            for v in j.values():
+                ticker = v.get("ticker", "").upper()
+                cik_str = str(v.get("cik_str", ""))
+                if ticker and cik_str:
+                    self.ticker_to_cik[ticker] = cik_str
+            cache.set(cache_key, self.ticker_to_cik)
+        except Exception as e:
+            print(f"Error loading SEC company tickers: {e}")
+    
+    def get_cik_for_ticker(self, ticker):
+        return self.ticker_to_cik.get(ticker.upper(), None)
+    
+    async def fetch_recent_filings_async(self, ticker, lookback_days=90, session=None):
+        """Async filing fetch for better performance"""
+        cache_key = f"edgar_{ticker}_{lookback_days}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        cik = self.get_cik_for_ticker(ticker)
+        if not cik:
+            result = (0.5, ["No CIK mapping"])
+            cache.set(cache_key, result)
+            return result
+        
+        cik_padded = cik.zfill(10)
+        url = self.SUBMISSIONS_URL_TEMPLATE.format(cik_padded)
+        
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+        
+        try:
+            async with session.get(
+                url, 
+                headers=self.headers, 
+                timeout=aiohttp.ClientTimeout(total=CONFIG["REQUEST_TIMEOUT"])
+            ) as response:
+                if response.status != 200:
+                    result = (0.6, [f"EDGAR fetch status {response.status}"])
+                    cache.set(cache_key, result)
+                    return result
+                
+                j = await response.json()
+                recent = j.get("filings", {}).get("recent", {})
+                forms = recent.get("form", [])
+                dates = recent.get("filingDate", [])
+                
+                findings = []
+                conf = 0.5
+                cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+                
+                for f, d in zip(forms, dates):
+                    try:
+                        fd = datetime.strptime(d, "%Y-%m-%d")
+                    except:
+                        continue
+                    if fd < cutoff:
+                        continue
+                    
+                    f_upper = f.upper()
+                    if f_upper in ("8-K", "10-Q", "10-K", "4", "3", "6-K", "S-1", "SC 13D", "SC 13G"):
+                        findings.append(f"{f} filed on {d}")
+                        # Weight severity
+                        if f_upper in ("8-K", "4", "3", "S-1"):
+                            conf += 0.12
+                        else:
+                            conf += 0.07
+                
+                conf = min(0.95, conf)
+                if not findings:
+                    findings = ["No major filings in lookback window"]
+                
+                result = (conf, findings)
+                cache.set(cache_key, result)
+                return result
+        except Exception as e:
+            print(f"EDGAR fetch error for {ticker}: {e}")
+            result = (0.6, [f"EDGAR error: {e}"])
+            return result
+        finally:
+            if close_session:
+                await session.close()
+    
+    def fetch_recent_filings(self, ticker, lookback_days=90):
+        """Sync wrapper for async method"""
+        return asyncio.run(self.fetch_recent_filings_async(ticker, lookback_days))
+    
+    async def fetch_batch_async(self, tickers, lookback_days=90):
+        """Fetch filings for multiple tickers in parallel"""
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self.fetch_recent_filings_async(ticker, lookback_days, session) 
+                for ticker in tickers
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return {ticker: result for ticker, result in zip(tickers, results)}
+    
+    def fetch_batch(self, tickers, lookback_days=90):
+        """Sync wrapper for batch async method"""
+        return asyncio.run(self.fetch_batch_async(tickers, lookback_days))
+
+# -------------------------
+# TECHNICAL ANALYSIS (Optimized)
+# -------------------------
+class TechnicalAnalyzer:
+    """Optimized technical analysis with vectorized operations"""
+    
+    @staticmethod
+    def calculate_indicators(df):
+        """Calculate all indicators in one pass"""
+        if df is None or len(df) < 20:
+            return None
+        
+        try:
+            # Use vectorized operations
+            df = df.copy()
+            
+            # RSI
+            df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+            
+            # MACD
+            macd = ta.trend.MACD(df['Close'])
+            df['MACD'] = macd.macd()
+            df['MACD_signal'] = macd.macd_signal()
+            
+            # Bollinger Bands
+            bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
+            df['BB_high'] = bollinger.bollinger_hband()
+            df['BB_low'] = bollinger.bollinger_lband()
+            df['BB_mid'] = bollinger.bollinger_mavg()
+            
+            # Volume moving average
+            df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
+            
+            # Moving averages
+            df['SMA_20'] = df['Close'].rolling(window=20).mean()
+            df['SMA_50'] = df['Close'].rolling(window=50).mean()
+            
+            return df
+        except Exception as e:
+            print(f"Technical analysis error: {e}")
+            return None
+    
+    @staticmethod
+    def generate_signals(df):
+        """Generate trading signals from indicators"""
+        if df is None or len(df) < 2:
+            return 0.5, []
+        
+        signals = []
+        score = 0.5
+        
+        try:
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            # RSI signals
+            if not np.isnan(latest['RSI']):
+                if latest['RSI'] < 30:
+                    signals.append("RSI oversold (<30)")
+                    score += 0.15
+                elif latest['RSI'] > 70:
+                    signals.append("RSI overbought (>70)")
+                    score -= 0.1
+            
+            # MACD crossover
+            if not (np.isnan(latest['MACD']) or np.isnan(latest['MACD_signal'])):
+                if prev['MACD'] < prev['MACD_signal'] and latest['MACD'] > latest['MACD_signal']:
+                    signals.append("MACD bullish crossover")
+                    score += 0.2
+                elif prev['MACD'] > prev['MACD_signal'] and latest['MACD'] < latest['MACD_signal']:
+                    signals.append("MACD bearish crossover")
+                    score -= 0.15
+            
+            # Bollinger Bands
+            if not (np.isnan(latest['BB_low']) or np.isnan(latest['BB_high'])):
+                if latest['Close'] < latest['BB_low']:
+                    signals.append("Price below lower Bollinger Band")
+                    score += 0.12
+                elif latest['Close'] > latest['BB_high']:
+                    signals.append("Price above upper Bollinger Band")
+                    score -= 0.08
+            
+            # Volume spike
+            if not np.isnan(latest['Volume_MA']) and latest['Volume'] > latest['Volume_MA'] * 1.5:
+                signals.append("Volume spike detected")
+                score += 0.1
+            
+            # Moving average crossover
+            if not (np.isnan(latest['SMA_20']) or np.isnan(latest['SMA_50'])):
+                if prev['SMA_20'] < prev['SMA_50'] and latest['SMA_20'] > latest['SMA_50']:
+                    signals.append("Golden cross (SMA 20 > SMA 50)")
+                    score += 0.18
+                elif prev['SMA_20'] > prev['SMA_50'] and latest['SMA_20'] < latest['SMA_50']:
+                    signals.append("Death cross (SMA 20 < SMA 50)")
+                    score -= 0.18
+            
+            score = max(0.0, min(1.0, score))
+            
+            if not signals:
+                signals = ["No significant signals"]
+            
+            return score, signals
+        except Exception as e:
+            print(f"Signal generation error: {e}")
+            return 0.5, ["Error generating signals"]
+
+# -------------------------
+# BATCH SCANNER (New!)
+# -------------------------
+class BatchScanner:
+    """High-performance batch scanner for multiple assets"""
+    
+    def __init__(self, watchlist_manager):
+        self.wm = watchlist_manager
+        self.stock_fetcher = StockFetcher()
+        self.edgar_fetcher = EdgarFetcher()
+        self.news_fetcher = NewsAPIFetcher(CONFIG["NEWSAPI_KEY"])
+        self.analyzer = TechnicalAnalyzer()
+    
+    def scan_watchlist(self, watchlist_name):
+        """Scan entire watchlist efficiently"""
+        assets = self.wm.get_assets(watchlist_name)
+        if not assets:
+            return []
+        
+        tickers = [asset[0] for asset in assets]
+        results = []
+        
+        # Batch fetch stock data
+        print(f"Fetching data for {len(tickers)} tickers...")
+        stock_data = self.stock_fetcher.fetch_batch(tickers)
+        
+        # Process each ticker
+        for ticker, asset_type, scan_scope in assets:
+            df = stock_data.get(ticker)
+            if df is None:
+                continue
+            
+            # Calculate indicators
+            df = self.analyzer.calculate_indicators(df)
+            if df is None:
+                continue
+            
+            # Generate signals
+            confidence, signals = self.analyzer.generate_signals(df)
+            
+            # Add to results if above threshold
+            if confidence >= CONFIG["ALERT_CONFIDENCE_THRESHOLD"]:
+                results.append({
+                    'ticker': ticker,
+                    'confidence': confidence,
+                    'signals': signals,
+                    'data': df
+                })
+        
+        # Sort by confidence
+        results.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return results[:CONFIG["TOP_N_SIGNALS"]]
+
+# -------------------------
+# NOTIFICATION SYSTEM (Optimized)
+# -------------------------
+class NotificationManager:
+    """Async notification system"""
+    
+    @staticmethod
+    async def send_telegram_async(message):
+        if not CONFIG["TELEGRAM_TOKEN"] or CONFIG["TELEGRAM_TOKEN"] == "YOUR_TELEGRAM_BOT_TOKEN":
+            return False
+        
+        url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_TOKEN']}/sendMessage"
+        payload = {
+            "chat_id": CONFIG["TELEGRAM_CHAT_ID"],
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    return resp.status == 200
+        except Exception as e:
+            print(f"Telegram error: {e}")
+            return False
+    
+    @staticmethod
+    async def send_discord_async(message):
+        if not CONFIG["DISCORD_WEBHOOK_URL"]:
+            return False
+        
+        payload = {"content": message}
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    CONFIG["DISCORD_WEBHOOK_URL"], 
+                    json=payload, 
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    return resp.status in (200, 204)
+        except Exception as e:
+            print(f"Discord error: {e}")
+            return False
+    
+    @staticmethod
+    def send_notifications(message):
+        """Send to all configured channels"""
+        async def send_all():
+            tasks = [
+                NotificationManager.send_telegram_async(message),
+                NotificationManager.send_discord_async(message)
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
+        asyncio.run(send_all())
+
+# -------------------------
+# MAIN SCANNER LOOP
+# -------------------------
+def main_scanner():
+    """Optimized main scanner with batch processing"""
+    wm = WatchlistManager()
+    scanner = BatchScanner(wm)
+    notif = NotificationManager()
+    
+    print("🚀 Optimized Market AI Scanner Started")
+    print(f"Scan interval: {CONFIG['SCAN_INTERVAL_SECONDS']}s")
+    print(f"Cache enabled: {CONFIG['ENABLE_CACHE']}")
+    print(f"Max workers: {CONFIG['MAX_WORKERS']}")
+    
+    while True:
+        try:
+            start_time = time.time()
+            watchlists = wm.list_watchlists()
+            
+            for watchlist in watchlists:
+                print(f"\n📊 Scanning watchlist: {watchlist}")
+                results = scanner.scan_watchlist(watchlist)
+                
+                for result in results:
+                    ticker = result['ticker']
+                    confidence = result['confidence']
+                    signals = result['signals']
+                    
+                    # Log alert
+                    reason = " | ".join(signals[:3])
+                    wm.log_alert(watchlist, ticker, confidence, reason)
+                    
+                    # Send notification
+                    msg = f"🎯 *Alert: {ticker}*\n"
+                    msg += f"Confidence: {confidence:.2%}\n"
+                    msg += f"Signals:\n" + "\n".join(f"• {s}" for s in signals[:3])
+                    
+                    notif.send_notifications(msg)
+                    print(f"✅ Alert: {ticker} ({confidence:.2%})")
+            
+            elapsed = time.time() - start_time
+            print(f"\n⏱️ Scan completed in {elapsed:.2f}s")
+            
+            # Sleep until next scan
+            sleep_time = max(0, CONFIG['SCAN_INTERVAL_SECONDS'] - elapsed)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        
+        except KeyboardInterrupt:
+            print("\n👋 Scanner stopped by user")
+            break
+        except Exception as e:
+            print(f"❌ Scanner error: {e}")
+            time.sleep(60)  # Wait before retrying
+
+if __name__ == "__main__":
+    main_scanner()

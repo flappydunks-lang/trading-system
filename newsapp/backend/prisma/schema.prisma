@@ -1,0 +1,79 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id             String            @id @default(uuid())
+  email          String            @unique
+  passwordHash   String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  selectedTopics UserTopic[]
+  interactions   UserInteraction[]
+}
+
+model Topic {
+  id       String         @id @default(uuid())
+  name     String         @unique
+  slug     String         @unique
+  articles ArticleTopic[]
+  users    UserTopic[]
+}
+
+model UserTopic {
+  userId  String
+  topicId String
+  user    User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic   Topic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@id([userId, topicId])
+}
+
+model Article {
+  id           String            @id @default(uuid())
+  externalId   String            @unique
+  title        String
+  summary      String
+  sourceName   String
+  sourceUrl    String
+  imageUrl     String?
+  videoUrl     String?
+  publishedAt  DateTime
+  createdAt    DateTime          @default(now())
+  topics       ArticleTopic[]
+  interactions UserInteraction[]
+}
+
+model ArticleTopic {
+  articleId String
+  topicId   String
+  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  topic     Topic   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, topicId])
+}
+
+model UserInteraction {
+  id         String          @id @default(uuid())
+  userId     String
+  articleId  String
+  type       InteractionType
+  durationMs Int?
+  createdAt  DateTime        @default(now())
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  article    Article         @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@index([userId, articleId])
+}
+
+enum InteractionType {
+  VIEW
+  LIKE
+  SAVE
+  DISMISS
+}
