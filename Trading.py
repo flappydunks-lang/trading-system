@@ -9673,18 +9673,22 @@ class FinalAIQuantum:
             vol_rec,
             "Vol controls how wide the bands spread. 2-year avg can be stale; 30-day reflects right now.",
         )
+        mu_2y_ann_pct  = (np.exp(mu_2y_daily * 252) - 1) * 100
+        mu_30d_ann_pct = (np.exp(mu_30d     * 252) - 1) * 100
+        mu_30d_flag    = "  ⚠ EXTREME" if abs(mu_30d_ann_pct) > 40 else ""
         inputs_tbl.add_row(
-            "Daily Drift (μ)",
-            f"{mu_2y_daily*100:.4f}%",
-            f"{mu_30d*100:.4f}%",
-            "30-day preferred",
-            "Drift is the implied daily edge. Recent drift is noisier but more relevant to current trend.",
+            "Daily Drift (μ)  [ann. equiv.]",
+            f"{mu_2y_daily*100:.4f}%/day  ({mu_2y_ann_pct:+.1f}%/yr)",
+            f"{mu_30d*100:.4f}%/day  ({mu_30d_ann_pct:+.1f}%/yr){mu_30d_flag}",
+            "⚠ 2-year recommended",
+            "Short-window drift is nearly pure noise. A 30-day spike/drop compounded over the horizon projects the stock toward extreme values. Use 2-year unless you have a strong directional thesis.",
         )
         console.print(inputs_tbl)
 
         console.print("""
-[dim]💡 Best Practice: Use the 30-day realized vol + current spot price.
-   This reflects actual market conditions today (not a 2-year average).
+[dim]💡 Best Practice: Use the 30-day realized vol + current spot price for σ.
+   For μ (drift), the 2-year estimate is far more reliable — 30-day drift is nearly
+   pure noise and can project extreme returns when a spike/crash is captured in the window.
    You can also override any value manually below.[/dim]
 """)
 
@@ -9694,15 +9698,65 @@ class FinalAIQuantum:
 
         S0    = FloatPrompt.ask(f"  Spot price (S₀)", default=S0_default)
         vol_i = FloatPrompt.ask(f"  Annualised volatility %", default=vol_default)
-        use_30d_mu = Confirm.ask("  Use 30-day drift for μ? (No = 2-year average)", default=True)
+        use_30d_mu = Confirm.ask("  Use 30-day drift for μ? (No = 2-year average  ← recommended)", default=False)
         mu_daily   = mu_30d if use_30d_mu else mu_2y_daily
+
+        # ── Annualised drift display + guardrails ─────────────────
+        _mu_ann_equiv = (np.exp(mu_daily * 252) - 1) * 100
+        mu_src_label  = "30-day" if use_30d_mu else "2-year"
+        console.print(
+            f"\n  [bold]Drift (μ) selected:[/bold] {mu_daily*100:.4f}%/day  "
+            f"= [bold]{_mu_ann_equiv:+.1f}%/year annualised[/bold]  [dim]({mu_src_label} window)[/dim]"
+        )
+
+        _DRIFT_CAP_LOW  = -40.0   # %/yr — below this is statistically extreme
+        _DRIFT_CAP_HIGH = +60.0   # %/yr
+        if use_30d_mu and (_mu_ann_equiv < _DRIFT_CAP_LOW or _mu_ann_equiv > _DRIFT_CAP_HIGH):
+            _mu_2y_ann = (np.exp(mu_2y_daily * 252) - 1) * 100
+            console.print(Panel(
+                f"[bold red]⚠  EXTREME DRIFT WARNING[/bold red]\n\n"
+                f"  The 30-day realised drift implies [bold red]{_mu_ann_equiv:+.1f}%/year[/bold red] annualised.\n"
+                f"  This falls outside the normal range ({_DRIFT_CAP_LOW:.0f}% to +{_DRIFT_CAP_HIGH:.0f}%/yr).\n\n"
+                f"  [bold]Why this happens:[/bold] A spike or crash over the last 30 days produces an extreme\n"
+                f"  daily drift that — when compounded over {horizon} trading days — projects the stock\n"
+                f"  toward near-zero or parabolic values. This is a statistical artefact, NOT a forecast.\n\n"
+                f"  Academic finance (Campbell, Lo & MacKinlay; Merton) is clear: short-window drift\n"
+                f"  estimates have near-zero predictive validity as GBM inputs.\n\n"
+                f"  [bold]Select how to proceed:[/bold]\n"
+                f"  [cyan]1[/cyan]  Use 2-year drift instead ({mu_2y_daily*100:.4f}%/day = {_mu_2y_ann:+.1f}%/yr)  [dim]← safest[/dim]\n"
+                f"  [cyan]2[/cyan]  Shrinkage blend: 70% × 2-year + 30% × 30-day  [dim]← dampens the spike[/dim]\n"
+                f"  [cyan]3[/cyan]  Cap drift to {_DRIFT_CAP_LOW:.0f}% / +{_DRIFT_CAP_HIGH:.0f}%/yr  [dim]← limits extreme extrapolation[/dim]\n"
+                f"  [cyan]4[/cyan]  Use the raw 30-day drift anyway  [dim]← not recommended[/dim]",
+                title="[bold white]Drift Guardrail[/bold white]", border_style="red"
+            ))
+            _drift_choice = Prompt.ask("  Select an option", choices=["1", "2", "3", "4"], default="1")
+            if _drift_choice == "1":
+                mu_daily     = mu_2y_daily
+                mu_src_label = "2-year (switched from extreme 30-day)"
+                console.print(f"[green]  ✓ Switched to 2-year drift: {mu_daily*100:.4f}%/day ({_mu_2y_ann:+.1f}%/yr)[/green]")
+            elif _drift_choice == "2":
+                mu_daily     = 0.70 * mu_2y_daily + 0.30 * mu_30d
+                _blended_ann = (np.exp(mu_daily * 252) - 1) * 100
+                mu_src_label = f"shrinkage (70% 2yr + 30% 30d, {_blended_ann:+.1f}%/yr)"
+                console.print(f"[green]  ✓ Blended drift: {mu_daily*100:.4f}%/day ({_blended_ann:+.1f}%/yr)[/green]")
+            elif _drift_choice == "3":
+                _cap_lo  = np.log(1 + _DRIFT_CAP_LOW  / 100) / 252
+                _cap_hi  = np.log(1 + _DRIFT_CAP_HIGH / 100) / 252
+                mu_daily = max(_cap_lo, min(_cap_hi, mu_30d))
+                _cap_ann = (np.exp(mu_daily * 252) - 1) * 100
+                mu_src_label = f"30-day capped at ±{_DRIFT_CAP_HIGH:.0f}%/yr ({_cap_ann:+.1f}%/yr)"
+                console.print(f"[yellow]  ✓ Drift capped: {mu_daily*100:.4f}%/day ({_cap_ann:+.1f}%/yr)[/yellow]")
+            else:
+                mu_src_label = f"30-day raw — EXTREME ({_mu_ann_equiv:+.1f}%/yr)"
+                console.print(f"[red]  ⚠ Proceeding with raw 30-day drift. Output may be severely distorted.[/red]")
 
         sigma   = vol_i / 100.0 / np.sqrt(252)   # daily sigma from annualised vol
         ann_vol = vol_i
 
+        _final_mu_ann = (np.exp(mu_daily * 252) - 1) * 100
         console.print(
             f"\n[dim]Running with: S₀=${S0:.2f} | σ(ann)={ann_vol:.1f}% | "
-            f"σ(daily)={sigma:.5f} | μ(daily)={mu_daily:.5f}[/dim]\n"
+            f"σ(daily)={sigma:.5f} | μ(daily)={mu_daily:.5f} ({_final_mu_ann:+.1f}%/yr ann.)[/dim]\n"
         )
 
         with Progress(SpinnerColumn(), TextColumn("Simulating {task.description}"), transient=True) as prog:
@@ -9755,7 +9809,6 @@ class FinalAIQuantum:
         # ── Display ───────────────────────────────────────────────
         DisplayManager.show_header()
         console.print(f"[bold cyan]🎲 Monte Carlo Results — {ticker}[/bold cyan]")
-        mu_src_label = "30-day" if use_30d_mu else "2-year"
         console.print(
             f"[dim]{n_sims:,} simulations | {horizon}-day horizon | GBM model | "
             f"S₀=${S0:.2f} ({spot_src}) | σ={ann_vol:.1f}% (30-day realized) | μ={mu_src_label}[/dim]\n"
