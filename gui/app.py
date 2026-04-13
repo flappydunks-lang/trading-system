@@ -117,15 +117,19 @@ class MetricCard(ctk.CTkFrame):
                       text_color=color or C["text"]).pack(padx=14, pady=(2, 12), anchor="w")
 
 
-def bg_run(output, status, label, fn):
+def bg_run(output, status, label, fn, btn=None):
     output.clear()
-    output.put(f"{label}...\n")
-    if status: status.set(label)
+    output.put(f"  Loading {label}...\n")
+    if status: status.set(f"Loading: {label}")
+    if btn: btn.configure(state="disabled", text="Loading...")
     def _w():
-        try: fn()
+        try:
+            fn()
         except Exception as e:
             import traceback
             _q.put(("put", f"\nError: {e}\n{traceback.format_exc()}"))
+        finally:
+            if btn: _q.put(("btn_reset", btn))
     threading.Thread(target=_w, daemon=True).start()
 
 
@@ -213,7 +217,7 @@ def page_dashboard(parent, app):
 
 def page_analyze(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    card = Card(f, title="Technical Analysis")
+    card = Card(f, title="Technical Analysis — 76+ Signals")
     card.pack(fill="x", padx=6, pady=6)
     row = ctk.CTkFrame(card, fg_color="transparent")
     row.pack(fill="x", padx=16, pady=(0, 14))
@@ -225,6 +229,9 @@ def page_analyze(parent, app):
     out = Output(f)
     out.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
+    btn = Btn(row, text="Analyze", color=C["accent"], width=100)
+    btn._orig_text = "Analyze"
+
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
@@ -233,40 +240,115 @@ def page_analyze(parent, app):
         itv = "1m" if is_day else "1d"
         def work():
             df, ind = get_ind(t, per, itv)
-            if ind is None: _q.put(("put", f"No data for {t}")); return
-            sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=is_day)
-            if not sig: _q.put(("put", "No signal")); return
-            p = ind.price
-            _q.put(("clear", None))
-            lines = [
-                f"  {t} @ ${p:.2f}",
-                f"  {'BUY' if sig.action=='BUY' else 'SELL' if sig.action=='SELL' else 'HOLD'} — {sig.confidence:.0f}% confidence\n",
-                f"  Stop Loss     ${sig.stop_loss:.2f}",
-                f"  Take Profit 1 ${sig.take_profit_1:.2f}",
-                f"  Take Profit 2 ${sig.take_profit_2:.2f}",
-                f"  R:R Ratio     1:{abs(sig.take_profit_1-p)/max(0.01,abs(p-sig.stop_loss)):.1f}\n",
-                f"  RSI {ind.rsi_14:.1f}  |  MACD {ind.macd:.4f}  |  ADX {ind.adx:.1f}" if ind.adx else "",
-                f"  SMA20 {ind.sma_20:.2f}  |  SMA50 {ind.sma_50:.2f}",
-                f"  EMA8 {ind.ema_8:.2f}  |  EMA21 {ind.ema_21:.2f}",
-                f"  ATR {ind.atr:.4f} ({ind.atr_percent:.2f}%)" if ind.atr_percent else "",
-                f"  Volume {ind.volume_ratio:.2f}x  |  Regime: {ind.market_regime}" if ind.market_regime else "",
-            ]
-            for l in lines:
-                if l: _q.put(("put", l))
-            if hasattr(sig, 'supporting_signals') and sig.supporting_signals:
-                _q.put(("put", "\n  Supporting signals:"))
-                for s in sig.supporting_signals[:12]: _q.put(("put", f"    {s}"))
-            _q.put(("status", f"{t}: {sig.action} ({sig.confidence:.0f}%)"))
-        bg_run(out, app.status, f"Analyzing {t}", work)
+            if ind is None: _q.put(("put", f"  No data for {t}")); return
 
-    Btn(row, text="Analyze", color=C["accent"], width=100, command=_run).pack(side="left")
+            # Try Finnhub for live price
+            try:
+                import requests
+                fh = os.getenv('FINNHUB_API_KEY','')
+                if fh:
+                    r = requests.get(f"https://finnhub.io/api/v1/quote?symbol={t}&token={fh}", timeout=3)
+                    if r.status_code == 200:
+                        c = r.json().get('c',0)
+                        if c > 0: ind.price = float(c); ind.close = float(c)
+            except Exception: pass
+
+            sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=is_day)
+            if not sig: _q.put(("put", "  No signal generated (market may be too choppy)")); return
+            p = ind.price
+
+            _q.put(("clear", None))
+            _q.put(("put", f"  {'='*58}"))
+            _q.put(("put", f"  ANALYSIS: {t} @ ${p:.2f}  ({style_v.get().upper()} TRADING)"))
+            _q.put(("put", f"  {'='*58}\n"))
+
+            # Signal
+            _q.put(("put", f"  SIGNAL: {sig.action}  —  {sig.confidence:.0f}% confidence\n"))
+
+            # Trade plan
+            _q.put(("put", f"  TRADE PLAN"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Entry Price':<24} ${p:.2f}"))
+            _q.put(("put", f"  {'Stop Loss':<24} ${sig.stop_loss:.2f}  ({(sig.stop_loss-p)/p*100:+.2f}%)"))
+            _q.put(("put", f"  {'Take Profit 1':<24} ${sig.take_profit_1:.2f}  ({(sig.take_profit_1-p)/p*100:+.2f}%)"))
+            _q.put(("put", f"  {'Take Profit 2':<24} ${sig.take_profit_2:.2f}  ({(sig.take_profit_2-p)/p*100:+.2f}%)"))
+            _q.put(("put", f"  {'Take Profit 3':<24} ${sig.take_profit_3:.2f}  ({(sig.take_profit_3-p)/p*100:+.2f}%)"))
+            risk = abs(p - sig.stop_loss); reward = abs(sig.take_profit_1 - p)
+            _q.put(("put", f"  {'Risk/Share':<24} ${risk:.2f}"))
+            _q.put(("put", f"  {'Reward/Share':<24} ${reward:.2f}"))
+            _q.put(("put", f"  {'R:R Ratio':<24} 1:{reward/max(0.01,risk):.1f}"))
+
+            # Position sizing
+            acct = 100000
+            shares = int(acct * 0.01 / max(0.01, risk))
+            _q.put(("put", f"\n  POSITION SIZING (1% risk on $100K)"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Shares':<24} {shares}"))
+            _q.put(("put", f"  {'Notional':<24} ${shares * p:,.2f}"))
+            _q.put(("put", f"  {'Max Loss':<24} ${shares * risk:,.2f}"))
+            _q.put(("put", f"  {'Max Gain (TP1)':<24} ${shares * reward:,.2f}"))
+
+            # Indicators
+            _q.put(("put", f"\n  KEY INDICATORS"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'RSI(14)':<24} {ind.rsi_14:.1f}"))
+            if ind.rsi_7: _q.put(("put", f"  {'RSI(7)':<24} {ind.rsi_7:.1f}"))
+            _q.put(("put", f"  {'MACD':<24} {ind.macd:.4f}  (Signal: {ind.macd_signal:.4f})"))
+            if ind.macd_histogram is not None: _q.put(("put", f"  {'MACD Histogram':<24} {ind.macd_histogram:.4f}"))
+            if ind.adx: _q.put(("put", f"  {'ADX':<24} {ind.adx:.1f}"))
+            if ind.plus_di: _q.put(("put", f"  {'+DI / -DI':<24} {ind.plus_di:.1f} / {ind.minus_di:.1f}"))
+            _q.put(("put", f"  {'ATR':<24} {ind.atr:.4f} ({ind.atr_percent:.2f}%)" if ind.atr_percent else ""))
+            if ind.stochastic_k: _q.put(("put", f"  {'Stochastic K/D':<24} {ind.stochastic_k:.1f} / {ind.stochastic_d:.1f}"))
+            if ind.williams_r: _q.put(("put", f"  {'Williams %R':<24} {ind.williams_r:.1f}"))
+            if ind.cci: _q.put(("put", f"  {'CCI':<24} {ind.cci:.1f}"))
+            if ind.mfi: _q.put(("put", f"  {'MFI':<24} {ind.mfi:.1f}"))
+            if ind.volume_ratio: _q.put(("put", f"  {'Volume Ratio':<24} {ind.volume_ratio:.2f}x"))
+            if ind.market_regime: _q.put(("put", f"  {'Market Regime':<24} {ind.market_regime} ({ind.regime_confidence:.0f}%)"))
+
+            # Moving averages
+            _q.put(("put", f"\n  MOVING AVERAGES"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'SMA 20 / 50':<24} ${ind.sma_20:.2f} / ${ind.sma_50:.2f}"))
+            if ind.sma_200: _q.put(("put", f"  {'SMA 200':<24} ${ind.sma_200:.2f}"))
+            _q.put(("put", f"  {'EMA 8 / 21 / 34':<24} ${ind.ema_8:.2f} / ${ind.ema_21:.2f} / ${ind.ema_34:.2f}"))
+            if ind.bb_upper: _q.put(("put", f"  {'Bollinger':<24} ${ind.bb_lower:.2f} — ${ind.bb_middle:.2f} — ${ind.bb_upper:.2f}"))
+            if ind.vwap: _q.put(("put", f"  {'VWAP':<24} ${ind.vwap:.2f}"))
+
+            # Ichimoku
+            if ind.tenkan_sen and ind.kijun_sen:
+                _q.put(("put", f"\n  ICHIMOKU"))
+                _q.put(("put", f"  {'─'*54}"))
+                _q.put(("put", f"  {'Tenkan / Kijun':<24} ${ind.tenkan_sen:.2f} / ${ind.kijun_sen:.2f}"))
+                if ind.senkou_a: _q.put(("put", f"  {'Cloud (A/B)':<24} ${ind.senkou_a:.2f} / ${ind.senkou_b:.2f}"))
+
+            # Supporting signals
+            if hasattr(sig, 'supporting_signals') and sig.supporting_signals:
+                _q.put(("put", f"\n  SIGNALS FIRED ({len(sig.supporting_signals)})"))
+                _q.put(("put", f"  {'─'*54}"))
+                for s in sig.supporting_signals[:15]: _q.put(("put", f"    {s}"))
+
+            # Risk factors
+            risk_flags = []
+            if ind.atr_percent and ind.atr_percent > 2.0: risk_flags.append(f"High ATR ({ind.atr_percent:.1f}%)")
+            if ind.volume_ratio and ind.volume_ratio < 0.5: risk_flags.append("Very low volume")
+            if ind.rsi_14 > 85 or ind.rsi_14 < 15: risk_flags.append(f"Extreme RSI ({ind.rsi_14:.0f})")
+            if risk_flags:
+                _q.put(("put", f"\n  RISK FLAGS"))
+                _q.put(("put", f"  {'─'*54}"))
+                for rf in risk_flags: _q.put(("put", f"    {rf}"))
+
+            _q.put(("status", f"{t}: {sig.action} ({sig.confidence:.0f}%) @ ${p:.2f}"))
+        bg_run(out, app.status, f"Analyzing {t}", work, btn)
+
+    btn.configure(command=_run)
+    btn.pack(side="left")
     ticker_e.bind("<Return>", lambda e: _run())
     return f
 
 
 def page_scanner(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    card = Card(f, title="Market Scanner")
+    card = Card(f, title="Market Scanner — Multi-Universe")
     card.pack(fill="x", padx=6, pady=6)
     row = ctk.CTkFrame(card, fg_color="transparent")
     row.pack(fill="x", padx=16, pady=(0, 14))
@@ -278,34 +360,51 @@ def page_scanner(parent, app):
     conf_e.pack(side="left")
     out = Output(f)
     out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    btn = Btn(row, text="Scan", color=C["accent"], width=80)
+    btn._orig_text = "Scan"
 
     def _run():
         def work():
             mod = T()
             tickers = list(getattr(mod, 'MARKET_UNIVERSES', {}).get(uni_v.get(), ['AAPL','MSFT','GOOGL','NVDA','AMZN']))
             thresh = float(conf_e.get() or 70)
-            _q.put(("put", f"Scanning {len(tickers)} tickers...\n"))
-            hits = 0
-            for t in tickers:
+            _q.put(("clear", None))
+            _q.put(("put", f"  {'='*62}"))
+            _q.put(("put", f"  SCANNING: {uni_v.get().upper()}  ({len(tickers)} tickers, min {thresh:.0f}%)"))
+            _q.put(("put", f"  {'='*62}\n"))
+            _q.put(("put", f"  {'Signal':>6} {'Ticker':<8} {'Price':>10} {'Conf':>6} {'RSI':>6} {'Regime':<10}"))
+            _q.put(("put", f"  {'─'*56}"))
+            hits = []
+            for i, t in enumerate(tickers):
                 try:
                     _, ind = get_ind(t, "5d", "1m")
                     if ind is None: continue
                     sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=True)
                     if sig and sig.action != 'HOLD' and sig.confidence >= thresh:
-                        hits += 1
-                        _q.put(("put", f"  {sig.action:>4} {t:<8} ${ind.price:>10.2f}  {sig.confidence:.0f}%"))
+                        hits.append((t, sig, ind))
+                        reg = (ind.market_regime or "?")[:8]
+                        _q.put(("put", f"  {sig.action:>6} {t:<8} ${ind.price:>9.2f} {sig.confidence:>5.0f}% {ind.rsi_14:>5.0f} {reg}"))
+                    if (i+1) % 5 == 0: _q.put(("status", f"Scanning {i+1}/{len(tickers)}..."))
                 except Exception: continue
-            _q.put(("put", f"\n{hits} signal(s) from {len(tickers)} scanned"))
-            _q.put(("status", f"Scanner: {hits} hits"))
-        bg_run(out, app.status, "Scanning", work)
+            _q.put(("put", f"\n  {'='*56}"))
+            _q.put(("put", f"  {len(hits)} signal(s) from {len(tickers)} scanned"))
+            if hits:
+                buys = sum(1 for _,s,_ in hits if s.action=='BUY')
+                sells = len(hits) - buys
+                _q.put(("put", f"  BUY: {buys}  |  SELL: {sells}"))
+                best = max(hits, key=lambda x: x[1].confidence)
+                _q.put(("put", f"\n  Best signal: {best[0]} {best[1].action} ({best[1].confidence:.0f}%) @ ${best[2].price:.2f}"))
+            _q.put(("status", f"Scanner: {len(hits)} hits"))
+        bg_run(out, app.status, f"Scanning {uni_v.get()}", work, btn)
 
-    Btn(row, text="Scan", color=C["accent"], width=80, command=_run).pack(side="left", padx=8)
+    btn.configure(command=_run)
+    btn.pack(side="left", padx=8)
     return f
 
 
 def page_news(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    card = Card(f, title="News & Market Intel")
+    card = Card(f, title="News & Market Intelligence")
     card.pack(fill="x", padx=6, pady=6)
     row = ctk.CTkFrame(card, fg_color="transparent")
     row.pack(fill="x", padx=16, pady=(0,14))
@@ -313,14 +412,43 @@ def page_news(parent, app):
     ticker_e.pack(side="left", padx=(0,8))
     out = Output(f)
     out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    btn = Btn(row, text="Fetch News", color=C["accent"], width=110)
+    btn._orig_text = "Fetch News"
 
     def _run():
         t = ticker_e.get().strip().upper() or "AAPL"
         def work():
             import requests
-            for name, env, url_fn in [
-                ("NewsData", "NEWSDATA_API_KEY", lambda k: f"https://newsdata.io/api/1/news?apikey={k}&q={t}&language=en&size=8"),
-                ("News API", "NEWS_API_KEY", lambda k: f"https://newsapi.org/v2/everything?q={t}&apiKey={k}&pageSize=8&sortBy=publishedAt"),
+            _q.put(("clear", None))
+            _q.put(("put", f"  {'='*58}"))
+            _q.put(("put", f"  NEWS & MARKET INTEL: {t}"))
+            _q.put(("put", f"  {'='*58}\n"))
+
+            # Finnhub company news
+            fh = os.getenv('FINNHUB_API_KEY','')
+            if fh:
+                try:
+                    from_d = (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')
+                    to_d = datetime.now().strftime('%Y-%m-%d')
+                    r = requests.get(f"https://finnhub.io/api/v1/company-news?symbol={t}&from={from_d}&to={to_d}&token={fh}", timeout=8)
+                    if r.status_code == 200:
+                        news = r.json()[:8]
+                        if news:
+                            _q.put(("put", f"  FINNHUB COMPANY NEWS ({len(news)} articles)"))
+                            _q.put(("put", f"  {'─'*54}"))
+                            for n in news:
+                                _q.put(("put", f"    [{n.get('datetime','')[:10] if isinstance(n.get('datetime'),str) else datetime.fromtimestamp(n.get('datetime',0)).strftime('%Y-%m-%d')}] {n.get('headline','?')[:75]}"))
+                                if n.get('summary'): _q.put(("put", f"      {n['summary'][:100]}..."))
+                            _q.put(("put", ""))
+                except Exception: pass
+
+            for name, env, url_fn, key_r, key_a in [
+                ("NEWSDATA", "NEWSDATA_API_KEY",
+                 lambda k: f"https://newsdata.io/api/1/news?apikey={k}&q={t}&language=en&size=8",
+                 "results", None),
+                ("NEWS API", "NEWS_API_KEY",
+                 lambda k: f"https://newsapi.org/v2/everything?q={t}&apiKey={k}&pageSize=8&sortBy=publishedAt",
+                 None, "articles"),
             ]:
                 key = os.getenv(env, '')
                 if not key: continue
@@ -328,18 +456,23 @@ def page_news(parent, app):
                     r = requests.get(url_fn(key), timeout=8)
                     if r.status_code != 200: continue
                     data = r.json()
-                    articles = data.get('results') or data.get('articles') or []
+                    articles = data.get(key_r) or data.get(key_a) or data.get('results') or data.get('articles') or []
                     if articles:
-                        _q.put(("put", f"  {name}:"))
+                        _q.put(("put", f"  {name} HEADLINES"))
+                        _q.put(("put", f"  {'─'*54}"))
                         for a in articles[:8]:
                             title = a.get('title', '?')
                             date = (a.get('pubDate') or a.get('publishedAt') or '')[:10]
+                            source = a.get('source_id') or (a.get('source',{}).get('name','') if isinstance(a.get('source'),dict) else '')
                             _q.put(("put", f"    [{date}] {title}"))
+                            if source: _q.put(("put", f"      Source: {source}"))
                         _q.put(("put", ""))
                 except Exception: continue
-        bg_run(out, app.status, f"News: {t}", work)
+            _q.put(("status", f"News loaded for {t}"))
+        bg_run(out, app.status, f"News: {t}", work, btn)
 
-    Btn(row, text="Fetch News", color=C["accent"], width=110, command=_run).pack(side="left")
+    btn.configure(command=_run)
+    btn.pack(side="left")
     return f
 
 
@@ -356,80 +489,159 @@ def page_swarm(parent, app):
     ctk.CTkOptionMenu(row, values=["2","3","4"], variable=rounds_v, width=55, height=36).pack(side="left")
     out = Output(f)
     out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    btn = Btn(row, text="Run Swarm", color=C["purple"], width=110)
+    btn._orig_text = "Run Swarm"
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
             _, ind = get_ind(t)
-            if ind is None: _q.put(("put", "No data")); return
+            if ind is None: _q.put(("put", "  No data")); return
+            _q.put(("clear", None))
+            _q.put(("put", f"  {'='*58}"))
+            _q.put(("put", f"  SWARM INTELLIGENCE: {t} @ ${ind.price:.2f}"))
+            _q.put(("put", f"  12 agents x {rounds_v.get()} debate rounds via Groq LLM"))
+            _q.put(("put", f"  {'='*58}\n"))
+            _q.put(("put", f"  Agents are deliberating... (this takes 1-3 minutes)\n"))
+
             swarm = T().SwarmIntelligence()
             result = swarm.analyze(t, ind, rounds=int(rounds_v.get()))
             a, c = result.get('action','HOLD'), result.get('confidence',0)
             bd = result.get('breakdown',{})
-            _q.put(("put", f"\n  CONSENSUS: {a} — {c:.1f}% confidence"))
-            _q.put(("put", f"  BUY {bd.get('buy',0):.0f}%  |  SELL {bd.get('sell',0):.0f}%  |  HOLD {bd.get('hold',0):.0f}%\n"))
-            for r in result.get('reasons', [])[:5]: _q.put(("put", f"    {r}"))
-            _q.put(("put", "\n  Agent Rankings:"))
-            for ag in sorted(swarm.agents, key=lambda x: x.accuracy, reverse=True):
-                bar = "*" * int(ag.accuracy * 20)
-                _q.put(("put", f"    {ag.name:<22} {ag.accuracy*100:>5.0f}%  {ag.weight:.1f}x  {bar}"))
-            _q.put(("status", f"Swarm: {a} on {t} ({c:.0f}%)"))
-        bg_run(out, app.status, f"Swarm: {t}", work)
 
-    Btn(row, text="Run Swarm", color=C["purple"], width=110, command=_run).pack(side="left", padx=8)
+            _q.put(("put", f"\n  {'='*58}"))
+            _q.put(("put", f"  CONSENSUS: {a} — {c:.1f}% confidence"))
+            _q.put(("put", f"  {'='*58}\n"))
+            _q.put(("put", f"  {'BUY':>8}: {bd.get('buy',0):>5.1f}%"))
+            _q.put(("put", f"  {'SELL':>8}: {bd.get('sell',0):>5.1f}%"))
+            _q.put(("put", f"  {'HOLD':>8}: {bd.get('hold',0):>5.1f}%"))
+
+            reasons = result.get('reasons', [])
+            if reasons:
+                _q.put(("put", f"\n  TOP REASONS"))
+                _q.put(("put", f"  {'─'*54}"))
+                for r in reasons[:6]: _q.put(("put", f"    {r}"))
+
+            _q.put(("put", f"\n  AGENT LEADERBOARD"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Agent':<22} {'Accuracy':>8} {'Weight':>7} {'Calls':>6}  Performance"))
+            for ag in sorted(swarm.agents, key=lambda x: x.accuracy, reverse=True):
+                bar = "|" * int(ag.accuracy * 20)
+                _q.put(("put", f"  {ag.name:<22} {ag.accuracy*100:>7.0f}% {ag.weight:>6.1f}x {ag.total_calls:>5}  {bar}"))
+
+            _q.put(("status", f"Swarm: {a} on {t} ({c:.0f}%)"))
+        bg_run(out, app.status, f"Swarm: {t} ({rounds_v.get()} rounds)", work, btn)
+
+    btn.configure(command=_run)
+    btn.pack(side="left", padx=8)
+    ctk.CTkLabel(card, text="  Agents learn from mistakes — accuracy improves over time. Weight 0.3x-3.0x.",
+                  font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0,10))
     return f
 
 
 def page_backtest(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    card = Card(f, title="Blind Prediction Test")
+    card = Card(f, title="Blind Prediction Test — Accuracy Validator")
     card.pack(fill="x", padx=6, pady=6)
     row = ctk.CTkFrame(card, fg_color="transparent")
-    row.pack(fill="x", padx=16, pady=(0,14))
-    ticker_e = Entry(row, width=80, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,6))
-    start_e = Entry(row, width=100); start_e.insert(0, (datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d')); start_e.pack(side="left", padx=3)
-    cutoff_e = Entry(row, width=100); cutoff_e.insert(0, (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')); cutoff_e.pack(side="left", padx=3)
-    horizon_v = StringVar(value="5")
-    ctk.CTkOptionMenu(row, values=["3","5","10","20"], variable=horizon_v, width=55, height=36).pack(side="left", padx=3)
+    row.pack(fill="x", padx=16, pady=(0,6))
+    for lbl in ["Ticker","Start","Cutoff","Days"]:
+        ctk.CTkLabel(row, text=lbl, font=(FONT, 10), text_color=C["text3"]).pack(side="left", padx=(6,2))
+        if lbl == "Ticker":
+            ticker_e = Entry(row, width=75, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,4))
+        elif lbl == "Start":
+            start_e = Entry(row, width=95); start_e.insert(0, (datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d')); start_e.pack(side="left", padx=(0,4))
+        elif lbl == "Cutoff":
+            cutoff_e = Entry(row, width=95); cutoff_e.insert(0, (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')); cutoff_e.pack(side="left", padx=(0,4))
+        else:
+            horizon_v = StringVar(value="5")
+            ctk.CTkOptionMenu(row, values=["3","5","10","20"], variable=horizon_v, width=55, height=36).pack(side="left", padx=(0,4))
     out = Output(f)
     out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    btn = Btn(row, text="Predict", color=C["green"], width=85)
+    btn._orig_text = "Predict"
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
-            import yfinance as yf
+            import yfinance as yf, numpy as np
             df = yf.download(t, start=start_e.get(), end=cutoff_e.get(), interval='1d', progress=False)
             if hasattr(df.columns, 'levels'): df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            if df is None or len(df) < 20: _q.put(("put", "Not enough data")); return
+            if df is None or len(df) < 20: _q.put(("put", "  Not enough data (need 20+ bars)")); return
             p = float(df['Close'].iloc[-1])
             ind = T().TechnicalAnalyzer.calculate_indicators(df)
-            if not ind: _q.put(("put", "Indicator error")); return
+            if not ind: _q.put(("put", "  Indicator error")); return
             ind.price = p; ind.close = p
             sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5)
-            if not sig: _q.put(("put", "No signal")); return
-            _q.put(("put", f"  Bot sees {len(df)} candles ending ${p:.2f}\n"))
-            _q.put(("put", f"  PREDICTION: {sig.action} ({sig.confidence:.0f}%)"))
-            _q.put(("put", f"  SL ${sig.stop_loss:.2f}  |  TP ${sig.take_profit_1:.2f}\n"))
+            if not sig: _q.put(("put", "  No signal generated")); return
+
+            _q.put(("clear", None))
+            _q.put(("put", f"  {'='*58}"))
+            _q.put(("put", f"  BLIND PREDICTION TEST: {t}"))
+            _q.put(("put", f"  Bot sees: {start_e.get()} to {cutoff_e.get()} ({len(df)} candles)"))
+            _q.put(("put", f"  {'='*58}\n"))
+
+            _q.put(("put", f"  PREDICTION"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Signal':<20} {sig.action} ({sig.confidence:.0f}%)"))
+            _q.put(("put", f"  {'Last Price':<20} ${p:.2f}"))
+            _q.put(("put", f"  {'Stop Loss':<20} ${sig.stop_loss:.2f}  ({(sig.stop_loss-p)/p*100:+.2f}%)"))
+            _q.put(("put", f"  {'Take Profit':<20} ${sig.take_profit_1:.2f}  ({(sig.take_profit_1-p)/p*100:+.2f}%)"))
+
+            # Reveal
             h = int(horizon_v.get())
             end = (datetime.strptime(cutoff_e.get(), '%Y-%m-%d')+timedelta(days=h+5)).strftime('%Y-%m-%d')
             fut = yf.download(t, start=cutoff_e.get(), end=end, interval='1d', progress=False)
             if hasattr(fut.columns, 'levels'): fut.columns = [c[0] if isinstance(c, tuple) else c for c in fut.columns]
             fut = fut.head(h)
-            if fut.empty: _q.put(("put", "No future data")); return
-            final = float(fut['Close'].iloc[-1]); chg = (final-p)/p*100
+            if fut.empty: _q.put(("put", "\n  No future data available")); return
+
+            final = float(fut['Close'].iloc[-1])
+            high_f = float(fut['High'].max())
+            low_f = float(fut['Low'].min())
+            chg = (final-p)/p*100
+            max_up = (high_f-p)/p*100
+            max_down = (low_f-p)/p*100
+
             ok = (sig.action=='BUY' and chg>0) or (sig.action=='SELL' and chg<0) or (sig.action=='HOLD' and abs(chg)<1.5)
-            _q.put(("put", f"  RESULT: ${p:.2f} -> ${final:.2f} ({chg:+.2f}%)"))
-            _q.put(("put", f"  VERDICT: {'CORRECT' if ok else 'WRONG'}\n"))
+            sl_hit = (sig.action=='BUY' and low_f<=sig.stop_loss) or (sig.action=='SELL' and high_f>=sig.stop_loss)
+            tp_hit = (sig.action=='BUY' and high_f>=sig.take_profit_1) or (sig.action=='SELL' and low_f<=sig.take_profit_1)
+
+            _q.put(("put", f"\n  WHAT ACTUALLY HAPPENED ({h} trading days)"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Final Price':<20} ${final:.2f}  ({chg:+.2f}%)"))
+            _q.put(("put", f"  {'Max Upside':<20} ${high_f:.2f}  ({max_up:+.2f}%)"))
+            _q.put(("put", f"  {'Max Downside':<20} ${low_f:.2f}  ({max_down:+.2f}%)"))
+            _q.put(("put", f"  {'SL Hit':<20} {'YES' if sl_hit else 'NO'}"))
+            _q.put(("put", f"  {'TP Hit':<20} {'YES' if tp_hit else 'NO'}"))
+
+            if tp_hit and not sl_hit:
+                _q.put(("put", f"\n  TRADE RESULT: PROFITABLE (TP hit, SL safe)"))
+            elif sl_hit and not tp_hit:
+                _q.put(("put", f"\n  TRADE RESULT: LOSS (SL hit before TP)"))
+            elif tp_hit and sl_hit:
+                _q.put(("put", f"\n  TRADE RESULT: UNCLEAR (both SL and TP were touched)"))
+
+            _q.put(("put", f"\n  {'='*58}"))
+            _q.put(("put", f"  VERDICT: {'CORRECT' if ok else 'WRONG'} — bot said {sig.action}, market went {chg:+.2f}%"))
+            _q.put(("put", f"  {'='*58}"))
+
+            _q.put(("put", f"\n  FUTURE CANDLES (hidden from bot)"))
+            _q.put(("put", f"  {'─'*54}"))
+            _q.put(("put", f"  {'Date':<12} {'Open':>9} {'High':>9} {'Low':>9} {'Close':>9} {'Chg':>8}"))
             for idx, r in fut.iterrows():
                 dc = (float(r['Close'])-p)/p*100
-                _q.put(("put", f"    {str(idx)[:10]}  ${float(r['Close']):>8.2f}  {dc:+.2f}%"))
-        bg_run(out, app.status, f"Predicting {t}", work)
+                _q.put(("put", f"  {str(idx)[:10]:<12} ${float(r['Open']):>8.2f} ${float(r['High']):>8.2f} ${float(r['Low']):>8.2f} ${float(r['Close']):>8.2f} {dc:>+7.2f}%"))
 
-    Btn(row, text="Test", color=C["green"], width=80, command=_run).pack(side="left", padx=6)
-    ctk.CTkLabel(card, text="  Start → Cutoff = what bot sees.  Days = how far to reveal.",
-                  font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0,10))
+            _q.put(("status", f"Backtest: {sig.action} -> {chg:+.1f}% {'CORRECT' if ok else 'WRONG'}"))
+        bg_run(out, app.status, f"Predicting {t}", work, btn)
+
+    btn.configure(command=_run)
+    btn.pack(side="left", padx=6)
+    ctk.CTkLabel(card, text="  Bot sees ONLY candles from Start to Cutoff. Then we reveal what happened after.",
+                  font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(4,10))
     return f
 
 
@@ -1004,6 +1216,9 @@ class App(ctk.CTk):
                 if cmd == "put" and panel: panel.put(data)
                 elif cmd == "clear" and panel: panel.clear()
                 elif cmd == "status": self.status.set(data)
+                elif cmd == "btn_reset" and data:
+                    try: data.configure(state="normal", text=data._orig_text)
+                    except Exception: pass
         except queue.Empty: pass
         self.after(80, self._poll)
 
