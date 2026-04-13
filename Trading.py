@@ -11042,12 +11042,13 @@ class FinalAIQuantum:
             console.print("22. 🐝 Swarm Intelligence (12 AI agents)")
             console.print("23. 🏆 Swarm Leaderboard")
             console.print("24. 📊 Backtester (TA/Swarm/Quant)")
+            console.print("25. 🎯 Deep Scan (run ALL analysis on a watchlist)")
             console.print("\n[bold]🔷 SYSTEM[/bold]")
             console.print("18. 👥 User Management")
             console.print("19. ⚙️  Settings")
             console.print("20. 🚪 Exit\n")
 
-            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 25)], default="1")
+            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 26)], default="1")
 
             if choice == "1":
                 self.analyze_ticker()
@@ -11102,7 +11103,229 @@ class FinalAIQuantum:
                 Prompt.ask("\nPress Enter to continue")
             elif choice == "24":
                 self.run_backtest()
-    
+            elif choice == "25":
+                self._deep_scan()
+
+    def _deep_scan(self):
+        """Run every analysis tool on a list of tickers and rank the best trades."""
+        DisplayManager.show_header()
+        console.print("[bold cyan]🎯 DEEP SCAN — Full Analysis Pipeline[/bold cyan]\n")
+        console.print("[dim]Runs TA (76 weighted signals), Monte Carlo, earnings check,[/dim]")
+        console.print("[dim]session filter, correlation check, and optionally Swarm AI.[/dim]\n")
+
+        raw = Prompt.ask("Enter tickers (comma-separated)", default="AAPL,MSFT,NVDA,GOOGL,AMZN,TSLA,META")
+        tickers = [t.strip().upper() for t in raw.split(',') if t.strip()]
+        if not tickers:
+            return
+
+        use_swarm = Prompt.ask("Include Swarm AI? (slow, uses Groq API)", choices=["y", "n"], default="n") == "y"
+        style = Prompt.ask("Style", choices=["day", "swing"], default="day")
+        is_day = style == "day"
+
+        console.print(f"\n[cyan]Deep scanning {len(tickers)} tickers...[/cyan]\n")
+
+        results = []
+        for i, ticker in enumerate(tickers):
+            console.print(f"[dim]  [{i+1}/{len(tickers)}] Analyzing {ticker}...[/dim]")
+            try:
+                # ── 1. Technical Analysis (76 weighted signals) ──
+                period = "5d" if is_day else "3mo"
+                interval = "1m" if is_day else "1d"
+                df = DataManager.fetch_data(ticker, period, interval)
+                if df is None or df.empty:
+                    continue
+                indicators = TechnicalAnalyzer.calculate_indicators(df)
+                if indicators is None:
+                    continue
+                indicators.price = float(df['Close'].iloc[-1])
+                indicators.close = indicators.price
+
+                signal = self.analyzer._fallback_analysis(
+                    ticker, indicators, float(self.config.get('account_size', 100000)),
+                    0.01, 2.5, is_day_trading=is_day)
+                if signal is None:
+                    continue
+
+                ta_action = signal.action
+                ta_conf = signal.confidence
+                ta_sl = signal.stop_loss
+                ta_tp = signal.take_profit_1
+                price = indicators.price
+
+                # ── 2. Earnings check ──
+                earn_safe, earn_reason, earn_days = EarningsCalendar.is_safe_to_trade(ticker)
+
+                # ── 3. Session check ──
+                sess_ok, sess_reason, sess_name = SessionTimer.should_trade(BrokerInterface.is_crypto_symbol(ticker))
+                sess_mult = SessionTimer.confidence_multiplier()
+
+                # ── 4. Correlation check against already-selected tickers ──
+                selected_syms = {r['ticker']: {} for r in results if r.get('final_action') in ('BUY', 'SELL')}
+                corr_ok, corr_reason = CorrelationFilter.check_exposure(ticker, selected_syms)
+
+                # ── 5. Monte Carlo (quick — 100K sims, 10 days) ──
+                mc_prob_up = 50.0
+                mc_median_chg = 0.0
+                try:
+                    import numpy as np
+                    closes = df['Close'].values.astype(float)
+                    if len(closes) >= 20:
+                        lr = np.diff(np.log(closes))
+                        mu = np.log(1.045) / 252  # Risk-free drift
+                        sigma = lr.std()
+                        S0 = closes[-1]
+                        rng = np.random.default_rng()
+                        paths = S0 * np.exp(np.cumsum((mu - 0.5*sigma**2) + sigma * rng.standard_normal((100000, 10)), axis=1))
+                        finals = paths[:, -1]
+                        mc_prob_up = float((finals > S0).mean() * 100)
+                        mc_median_chg = float((np.median(finals) - S0) / S0 * 100)
+                except Exception:
+                    pass
+
+                # ── 6. Swarm AI (optional) ──
+                swarm_action = None
+                swarm_conf = 0
+                if use_swarm:
+                    try:
+                        swarm_result = self.swarm.analyze(ticker, indicators, rounds=2)
+                        swarm_action = swarm_result.get('action')
+                        swarm_conf = swarm_result.get('confidence', 0)
+                    except Exception:
+                        pass
+
+                # ── 7. Composite score ──
+                # Weight: TA 40%, MC 20%, Swarm 25% (if used), Filters 15%
+                ta_score = 0
+                if ta_action == 'BUY': ta_score = ta_conf
+                elif ta_action == 'SELL': ta_score = -ta_conf
+
+                mc_score = (mc_prob_up - 50) * 2  # -100 to +100 scale
+
+                swarm_score = 0
+                if swarm_action == 'BUY': swarm_score = swarm_conf
+                elif swarm_action == 'SELL': swarm_score = -swarm_conf
+
+                filter_penalty = 0
+                if not earn_safe: filter_penalty -= 30
+                if not corr_ok: filter_penalty -= 20
+                if not sess_ok: filter_penalty -= 15
+
+                if use_swarm:
+                    composite = (ta_score * 0.35) + (mc_score * 0.20) + (swarm_score * 0.25) + (filter_penalty * 0.20)
+                else:
+                    composite = (ta_score * 0.50) + (mc_score * 0.25) + (filter_penalty * 0.25)
+
+                final_action = 'BUY' if composite > 20 else ('SELL' if composite < -20 else 'HOLD')
+
+                results.append({
+                    'ticker': ticker, 'price': price,
+                    'ta_action': ta_action, 'ta_conf': ta_conf, 'ta_sl': ta_sl, 'ta_tp': ta_tp,
+                    'mc_prob_up': mc_prob_up, 'mc_median_chg': mc_median_chg,
+                    'swarm_action': swarm_action, 'swarm_conf': swarm_conf,
+                    'earn_safe': earn_safe, 'earn_days': earn_days,
+                    'sess_ok': sess_ok, 'sess_name': sess_name, 'sess_mult': sess_mult,
+                    'corr_ok': corr_ok,
+                    'composite': composite, 'final_action': final_action,
+                    'regime': indicators.market_regime or '?',
+                    'rsi': indicators.rsi_14,
+                })
+            except Exception as e:
+                logger.debug(f"Deep scan error {ticker}: {e}")
+                continue
+
+        if not results:
+            console.print("[yellow]No results. Check your tickers.[/yellow]")
+            Prompt.ask("\nPress Enter to return")
+            return
+
+        # ── Display ranked results ──
+        results.sort(key=lambda r: abs(r['composite']), reverse=True)
+
+        console.print(f"\n[bold]{'='*80}[/bold]")
+        console.print(f"[bold]DEEP SCAN RESULTS — {len(results)} tickers analyzed[/bold]")
+        console.print(f"[bold]{'='*80}[/bold]\n")
+
+        table = Table(box=box.ROUNDED, show_lines=True, title="[bold]Ranked by Composite Score[/bold]")
+        table.add_column("Rank", justify="center", width=4)
+        table.add_column("Ticker", style="bold", width=7)
+        table.add_column("Price", justify="right", width=9)
+        table.add_column("TA Signal", justify="center", width=10)
+        table.add_column("TA Conf", justify="right", width=7)
+        table.add_column("MC Prob", justify="right", width=7)
+        if use_swarm:
+            table.add_column("Swarm", justify="center", width=10)
+        table.add_column("Regime", justify="center", width=9)
+        table.add_column("RSI", justify="right", width=5)
+        table.add_column("Flags", width=12)
+        table.add_column("Score", justify="right", width=7, style="bold")
+        table.add_column("VERDICT", justify="center", width=8)
+
+        for rank, r in enumerate(results, 1):
+            ta_color = "green" if r['ta_action'] == 'BUY' else ("red" if r['ta_action'] == 'SELL' else "yellow")
+            verdict_color = "green" if r['final_action'] == 'BUY' else ("red" if r['final_action'] == 'SELL' else "dim")
+
+            flags = []
+            if not r['earn_safe']: flags.append("EARN")
+            if not r['sess_ok']: flags.append("SESS")
+            if not r['corr_ok']: flags.append("CORR")
+            flag_str = ",".join(flags) if flags else "clear"
+
+            row_data = [
+                str(rank),
+                r['ticker'],
+                f"${r['price']:.2f}",
+                f"[{ta_color}]{r['ta_action']}[/{ta_color}]",
+                f"{r['ta_conf']:.0f}%",
+                f"{r['mc_prob_up']:.0f}%",
+            ]
+            if use_swarm:
+                sw = r['swarm_action'] or '-'
+                sw_color = "green" if sw == 'BUY' else ("red" if sw == 'SELL' else "dim")
+                row_data.append(f"[{sw_color}]{sw}[/{sw_color}] {r['swarm_conf']:.0f}%" if sw != '-' else "-")
+            row_data.extend([
+                r['regime'][:8],
+                f"{r['rsi']:.0f}",
+                f"[red]{flag_str}[/red]" if flags else f"[green]{flag_str}[/green]",
+                f"{r['composite']:+.0f}",
+                f"[{verdict_color}]{r['final_action']}[/{verdict_color}]",
+            ])
+            table.add_row(*row_data)
+
+        console.print(table)
+
+        # Top picks summary
+        buys = [r for r in results if r['final_action'] == 'BUY']
+        sells = [r for r in results if r['final_action'] == 'SELL']
+
+        if buys:
+            console.print(f"\n[bold green]TOP BUYS:[/bold green]")
+            for r in buys[:5]:
+                console.print(f"  {r['ticker']:<8} ${r['price']:.2f}  |  TA {r['ta_conf']:.0f}%  |  MC {r['mc_prob_up']:.0f}% up  |  "
+                              f"SL ${r['ta_sl']:.2f}  TP ${r['ta_tp']:.2f}  |  Score {r['composite']:+.0f}")
+
+        if sells:
+            console.print(f"\n[bold red]TOP SELLS:[/bold red]")
+            for r in sells[:5]:
+                console.print(f"  {r['ticker']:<8} ${r['price']:.2f}  |  TA {r['ta_conf']:.0f}%  |  MC {r['mc_prob_up']:.0f}% up  |  "
+                              f"SL ${r['ta_sl']:.2f}  TP ${r['ta_tp']:.2f}  |  Score {r['composite']:+.0f}")
+
+        holds = [r for r in results if r['final_action'] == 'HOLD']
+        if holds:
+            console.print(f"\n[dim]HOLD ({len(holds)}): {', '.join(r['ticker'] for r in holds[:10])}[/dim]")
+
+        # Telegram summary
+        try:
+            if hasattr(self, 'notifier') and self.notifier:
+                msg = f"Deep Scan: {len(tickers)} tickers\n"
+                if buys: msg += f"BUY: {', '.join(r['ticker'] for r in buys[:5])}\n"
+                if sells: msg += f"SELL: {', '.join(r['ticker'] for r in sells[:5])}\n"
+                msg += f"HOLD: {len(holds)}"
+                self.notifier.send(msg)
+        except Exception:
+            pass
+
+        Prompt.ask("\nPress Enter to return")
+
     def _run_swarm_analysis(self):
         """Run 12 AI trading agents on a ticker with adaptive weighting."""
         DisplayManager.show_header()
