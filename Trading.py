@@ -8948,6 +8948,341 @@ class DisplayManager:
         console.print(f"           Start{' '*(len(curve)-10)}End\n")
 
 # ==========================================
+# SWARM INTELLIGENCE — ADAPTIVE MULTI-AGENT PANEL
+# ==========================================
+
+class SwarmAgent:
+    """Single AI trading agent with a specific expertise and persistent track record."""
+
+    def __init__(self, name: str, role: str, style: str, system_prompt: str):
+        self.name = name
+        self.role = role
+        self.style = style  # 'aggressive', 'conservative', 'contrarian', 'neutral'
+        self.system_prompt = system_prompt
+        # Performance tracking (persisted across sessions)
+        self.total_calls = 0
+        self.correct_calls = 0
+        self.accuracy = 0.5  # Start at 50% (neutral)
+        self.weight = 1.0    # Dynamic weight based on accuracy
+        self.recent_calls: List[Dict] = []  # Last 50 calls for learning
+
+    def to_dict(self):
+        return {'name': self.name, 'total_calls': self.total_calls, 'correct_calls': self.correct_calls,
+                'accuracy': self.accuracy, 'weight': self.weight,
+                'recent_calls': self.recent_calls[-50:]}
+
+    def load_stats(self, data: dict):
+        self.total_calls = data.get('total_calls', 0)
+        self.correct_calls = data.get('correct_calls', 0)
+        self.accuracy = data.get('accuracy', 0.5)
+        self.weight = data.get('weight', 1.0)
+        self.recent_calls = data.get('recent_calls', [])
+
+    def update_accuracy(self):
+        if self.total_calls > 0:
+            self.accuracy = self.correct_calls / self.total_calls
+        # Weight: agents who are right more get heavier votes.
+        # Floor at 0.3 so even bad agents still contribute a little.
+        # Ceiling at 3.0 so no single agent dominates.
+        if self.total_calls >= 5:
+            self.weight = max(0.3, min(3.0, self.accuracy * 2.0))
+        else:
+            self.weight = 1.0  # Not enough data yet
+
+    def record_call(self, ticker: str, action: str, confidence: float, was_correct: Optional[bool] = None):
+        self.total_calls += 1
+        if was_correct is True:
+            self.correct_calls += 1
+        self.recent_calls.append({
+            'time': datetime.now().isoformat(), 'ticker': ticker,
+            'action': action, 'confidence': confidence, 'correct': was_correct
+        })
+        if len(self.recent_calls) > 50:
+            self.recent_calls = self.recent_calls[-50:]
+        self.update_accuracy()
+
+    def get_learning_context(self) -> str:
+        """Generate a learning prompt from recent mistakes."""
+        mistakes = [c for c in self.recent_calls[-20:] if c.get('correct') is False]
+        if not mistakes:
+            return ""
+        lines = [f"\nYou were WRONG on these recent calls — learn from them:"]
+        for m in mistakes[-5:]:
+            lines.append(f"  - {m['ticker']}: you said {m['action']} at {m['confidence']:.0f}% — WRONG")
+        lines.append("Adjust your analysis to avoid repeating these mistakes.\n")
+        return "\n".join(lines)
+
+
+class SwarmIntelligence:
+    """12-agent trading panel with adaptive weighting. Agents that are right more often
+    get heavier votes. Each agent has a distinct expertise and personality."""
+
+    AGENTS = [
+        SwarmAgent("Alpha Bull", "Momentum Trader", "aggressive",
+            "You are an aggressive momentum trader. You look for stocks breaking out with volume, "
+            "strong RSI, and accelerating price action. You love buying breakouts and riding trends. "
+            "You're quick to enter and use tight trailing stops."),
+        SwarmAgent("Iron Bear", "Risk Analyst", "conservative",
+            "You are a risk-focused analyst. You look for overextended conditions, bearish divergences, "
+            "and signs of distribution. You prioritize capital preservation and are quick to recommend "
+            "selling when risk/reward deteriorates. You look for head & shoulders, double tops, and "
+            "weakening momentum as warning signs."),
+        SwarmAgent("The Fundamentalist", "Fundamental Analyst", "neutral",
+            "You focus on whether the price makes sense given market conditions. You consider "
+            "macro regime, sector rotation, and whether the stock is fairly valued relative to "
+            "its recent trading range. You're skeptical of purely technical moves."),
+        SwarmAgent("Chart Sage", "Technical Chartist", "neutral",
+            "You are a pure technical analyst. You focus on chart patterns (triangles, H&S, flags), "
+            "support/resistance levels, and classical charting principles. You believe price action "
+            "tells the whole story. You look for pattern completions and breakout confirmations."),
+        SwarmAgent("The Contrarian", "Contrarian Investor", "contrarian",
+            "You go against the crowd. When everyone is bullish, you look for reasons to sell. "
+            "When panic selling occurs, you look for buying opportunities. You focus on sentiment "
+            "extremes, capitulation signals, and mean reversion setups."),
+        SwarmAgent("Quant Prime", "Quantitative Strategist", "neutral",
+            "You analyze everything through statistical models. You focus on Z-scores, Sharpe ratios, "
+            "Bollinger Band positions, standard deviation moves, and probability distributions. "
+            "You only recommend trades with statistical edges above 1 standard deviation."),
+        SwarmAgent("Crowd Pulse", "Retail Sentiment Tracker", "aggressive",
+            "You track retail sentiment and momentum. You look for stocks with strong social buzz, "
+            "unusual volume patterns, and retail accumulation signals. You understand that retail "
+            "flow can drive short-term moves but can also indicate crowded trades."),
+        SwarmAgent("Dark Pool", "Institutional Flow Analyst", "neutral",
+            "You focus on institutional order flow signals: large block trades, unusual options activity, "
+            "dark pool prints, and smart money positioning. You look for OBV divergences and "
+            "accumulation/distribution patterns that suggest institutional involvement."),
+        SwarmAgent("Macro Hawk", "Macro Regime Analyst", "conservative",
+            "You analyze the broader macro environment: interest rates, dollar strength, VIX levels, "
+            "sector rotation, and risk-on/risk-off conditions. You provide context on whether "
+            "the current macro regime favors buying or selling this particular asset."),
+        SwarmAgent("Options Oracle", "Derivatives Analyst", "neutral",
+            "You analyze volatility and options-implied information: IV rank, put/call skew, "
+            "gamma exposure, and expected move calculations. You understand how derivatives "
+            "positioning affects underlying stock behavior."),
+        SwarmAgent("Sector Rotator", "Relative Strength Analyst", "neutral",
+            "You compare this stock's performance against its sector and the broader market. "
+            "You look for relative strength leaders and laggards, sector rotation patterns, "
+            "and whether money is flowing into or out of this sector."),
+        SwarmAgent("Event Catalyst", "Catalyst Analyst", "aggressive",
+            "You focus on upcoming catalysts: earnings dates, FDA decisions, product launches, "
+            "economic data releases, and corporate actions. You assess whether current positioning "
+            "ahead of catalysts presents opportunity or risk."),
+    ]
+
+    def __init__(self):
+        self.agents = list(self.AGENTS)
+        self._load_memory()
+
+    def _memory_path(self) -> Path:
+        return Path('config/swarm_agent_memory.json')
+
+    def _load_memory(self):
+        try:
+            p = self._memory_path()
+            if p.exists():
+                data = json.loads(p.read_text())
+                for agent in self.agents:
+                    if agent.name in data:
+                        agent.load_stats(data[agent.name])
+        except Exception: pass
+
+    def _save_memory(self):
+        try:
+            data = {a.name: a.to_dict() for a in self.agents}
+            Path('config').mkdir(exist_ok=True)
+            self._memory_path().write_text(json.dumps(data, indent=2))
+        except Exception: pass
+
+    def record_outcome(self, ticker: str, action: str, was_correct: bool):
+        """After a trade resolves, tell all agents who voted that direction if they were right."""
+        for agent in self.agents:
+            for call in reversed(agent.recent_calls):
+                if call.get('ticker') == ticker and call.get('correct') is None:
+                    was_agent_correct = (call['action'] == action) == was_correct
+                    call['correct'] = was_agent_correct
+                    if was_agent_correct:
+                        agent.correct_calls += 1
+                    agent.update_accuracy()
+                    break
+        self._save_memory()
+
+    def analyze(self, ticker: str, indicators, rounds: int = 3) -> Dict[str, Any]:
+        """Run all agents through multiple debate rounds. Returns consensus."""
+        groq_key = os.getenv('GROQ_API_KEY', '')
+        if not groq_key:
+            return {'action': 'HOLD', 'confidence': 0, 'reason': 'No Groq API key'}
+
+        # Build market context from indicators
+        context = self._build_context(ticker, indicators)
+
+        votes: Dict[str, List[Tuple[str, float, str, float]]] = {}  # {round: [(action, conf, reason, weight)]}
+        agent_history = ""
+
+        for r in range(1, rounds + 1):
+            round_votes = []
+            console.print(f"\n[bold]--- Round {r}/{rounds} ---[/bold]")
+
+            for agent in self.agents:
+                try:
+                    learning = agent.get_learning_context()
+                    acc_str = f"Your track record: {agent.accuracy*100:.0f}% accuracy over {agent.total_calls} calls. " if agent.total_calls >= 5 else ""
+
+                    prompt = (
+                        f"{agent.system_prompt}\n\n"
+                        f"{acc_str}{learning}"
+                        f"Analyze {ticker} for a DAY TRADE (minutes to hours hold).\n\n"
+                        f"MARKET DATA:\n{context}\n\n"
+                    )
+                    if r > 1 and agent_history:
+                        prompt += f"PREVIOUS ROUND OPINIONS:\n{agent_history}\n\n"
+
+                    prompt += (
+                        "Respond with EXACTLY this format (one line each):\n"
+                        "ACTION: BUY or SELL or HOLD\n"
+                        "CONFIDENCE: 0-100\n"
+                        "REASON: one sentence\n"
+                    )
+
+                    result = self._call_groq(groq_key, agent.system_prompt, prompt)
+                    action, conf, reason = self._parse_response(result)
+
+                    agent.record_call(ticker, action, conf)
+                    round_votes.append((action, conf, reason, agent.weight))
+
+                    color = "green" if action == "BUY" else ("red" if action == "SELL" else "dim")
+                    w_str = f" [dim]w={agent.weight:.1f}[/dim]" if agent.total_calls >= 5 else ""
+                    console.print(f"  [{color}]{action}[/{color}] {agent.name} ({agent.role}) - {conf:.0f}%{w_str} - {reason[:80]}")
+
+                except Exception as e:
+                    logger.debug(f"Swarm agent {agent.name} error: {e}")
+                    continue
+
+            votes[f"round_{r}"] = round_votes
+
+            # Build history for next round
+            agent_history = ""
+            for action, conf, reason, _ in round_votes:
+                agent_history += f"  {action} ({conf:.0f}%): {reason[:60]}\n"
+
+        self._save_memory()
+
+        # Weighted consensus from final round
+        return self._compute_consensus(votes, rounds)
+
+    def _build_context(self, ticker: str, indicators) -> str:
+        lines = [f"Ticker: {ticker}", f"Price: ${indicators.price:.2f}"]
+        try:
+            lines.append(f"RSI(14): {indicators.rsi_14:.1f}")
+            lines.append(f"RSI(7): {indicators.rsi_7:.1f}" if indicators.rsi_7 else "")
+            lines.append(f"MACD: {indicators.macd:.4f} | Signal: {indicators.macd_signal:.4f} | Hist: {indicators.macd_histogram:.4f}")
+            lines.append(f"SMA20: {indicators.sma_20:.2f} | SMA50: {indicators.sma_50:.2f} | SMA200: {indicators.sma_200:.2f}")
+            lines.append(f"EMA8: {indicators.ema_8:.2f} | EMA21: {indicators.ema_21:.2f} | EMA34: {indicators.ema_34:.2f}")
+            lines.append(f"ADX: {indicators.adx:.1f} | +DI: {indicators.plus_di:.1f} | -DI: {indicators.minus_di:.1f}")
+            lines.append(f"ATR: {indicators.atr:.4f} ({indicators.atr_percent:.2f}%)")
+            lines.append(f"BB Upper: {indicators.bb_upper:.2f} | Mid: {indicators.bb_middle:.2f} | Lower: {indicators.bb_lower:.2f}")
+            lines.append(f"Stoch K: {indicators.stochastic_k:.1f} | D: {indicators.stochastic_d:.1f}")
+            lines.append(f"Williams %R: {indicators.williams_r:.1f}")
+            lines.append(f"CCI: {indicators.cci:.1f}")
+            lines.append(f"MFI: {indicators.mfi:.1f}")
+            lines.append(f"Volume Ratio: {indicators.volume_ratio:.2f}x")
+            lines.append(f"Market Regime: {indicators.market_regime} ({indicators.regime_confidence:.0f}%)")
+            if indicators.vwap: lines.append(f"VWAP: {indicators.vwap:.2f}")
+            # Ichimoku
+            if indicators.tenkan_sen: lines.append(f"Ichimoku: Tenkan={indicators.tenkan_sen:.2f} Kijun={indicators.kijun_sen:.2f}")
+            if indicators.senkou_a: lines.append(f"Cloud: Senkou A={indicators.senkou_a:.2f} B={indicators.senkou_b:.2f}")
+        except Exception: pass
+        return "\n".join([l for l in lines if l])
+
+    def _call_groq(self, api_key: str, system: str, user: str) -> str:
+        try:
+            from groq import Groq
+            client = Groq(api_key=api_key)
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            logger.debug(f"Groq API error: {e}")
+            return "ACTION: HOLD\nCONFIDENCE: 50\nREASON: API error"
+
+    def _parse_response(self, text: str) -> Tuple[str, float, str]:
+        action, conf, reason = "HOLD", 50.0, "Parse error"
+        for line in text.split('\n'):
+            line = line.strip()
+            upper = line.upper()
+            if upper.startswith('ACTION:'):
+                val = line.split(':', 1)[1].strip().upper()
+                if val in ('BUY', 'SELL', 'HOLD'): action = val
+            elif upper.startswith('CONFIDENCE:'):
+                try: conf = float(line.split(':', 1)[1].strip().replace('%', ''))
+                except Exception: pass
+            elif upper.startswith('REASON:'):
+                reason = line.split(':', 1)[1].strip()
+        return action, min(100, max(0, conf)), reason
+
+    def _compute_consensus(self, votes: dict, rounds: int) -> Dict[str, Any]:
+        """Performance-weighted consensus from the final round."""
+        final_key = f"round_{rounds}"
+        if final_key not in votes:
+            return {'action': 'HOLD', 'confidence': 0, 'reason': 'No votes'}
+
+        final = votes[final_key]
+        buy_score, sell_score, hold_score = 0.0, 0.0, 0.0
+        buy_reasons, sell_reasons = [], []
+
+        for action, conf, reason, weight in final:
+            weighted = (conf / 100.0) * weight
+            if action == 'BUY':
+                buy_score += weighted
+                buy_reasons.append(reason)
+            elif action == 'SELL':
+                sell_score += weighted
+                sell_reasons.append(reason)
+            else:
+                hold_score += weighted
+
+        total = buy_score + sell_score + hold_score
+        if total <= 0:
+            return {'action': 'HOLD', 'confidence': 0, 'reason': 'No consensus'}
+
+        buy_pct = buy_score / total * 100
+        sell_pct = sell_score / total * 100
+        hold_pct = hold_score / total * 100
+
+        if buy_pct > sell_pct and buy_pct > hold_pct and buy_pct > 40:
+            return {'action': 'BUY', 'confidence': buy_pct, 'reasons': buy_reasons,
+                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
+        elif sell_pct > buy_pct and sell_pct > hold_pct and sell_pct > 40:
+            return {'action': 'SELL', 'confidence': sell_pct, 'reasons': sell_reasons,
+                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
+        else:
+            return {'action': 'HOLD', 'confidence': hold_pct, 'reasons': ['No clear consensus'],
+                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
+
+    def print_leaderboard(self):
+        """Show agent performance ranking."""
+        sorted_agents = sorted(self.agents, key=lambda a: a.accuracy, reverse=True)
+        table = Table(title="Swarm Agent Leaderboard", box=box.SIMPLE)
+        table.add_column("Agent", style="cyan")
+        table.add_column("Role", style="dim")
+        table.add_column("Calls", justify="right")
+        table.add_column("Accuracy", justify="right")
+        table.add_column("Weight", justify="right")
+        for a in sorted_agents:
+            acc_color = "green" if a.accuracy > 0.55 else ("red" if a.accuracy < 0.45 else "yellow")
+            table.add_row(a.name, a.role, str(a.total_calls),
+                          f"[{acc_color}]{a.accuracy*100:.1f}%[/{acc_color}]",
+                          f"{a.weight:.2f}x")
+        console.print(table)
+
+
+# ==========================================
 # BROKER INTERFACE + IBKR + AUTO TRADER
 # ==========================================
 
@@ -9449,6 +9784,7 @@ class FinalAIQuantum:
         self.paper_trading = PaperTradingManager()
         self.broker = self._init_broker()
         self.auto_trader = AutoTrader(self)
+        self.swarm = SwarmIntelligence()
         self.current_user = None
 
     @staticmethod
@@ -10073,12 +10409,15 @@ class FinalAIQuantum:
             console.print("17. 💬 AI Trade Advisor")
             console.print("\n[bold]🔷 QUANT LAB[/bold]")
             console.print("21. 🧪 Quantitative Projects")
+            console.print("\n[bold]🔷 SWARM & AUTO[/bold]")
+            console.print("22. 🐝 Swarm Intelligence (12 AI agents)")
+            console.print("23. 🏆 Swarm Leaderboard")
             console.print("\n[bold]🔷 SYSTEM[/bold]")
             console.print("18. 👥 User Management")
             console.print("19. ⚙️  Settings")
             console.print("20. 🚪 Exit\n")
 
-            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 22)], default="1")
+            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 24)], default="1")
 
             if choice == "1":
                 self.analyze_ticker()
@@ -10126,7 +10465,91 @@ class FinalAIQuantum:
                 break
             elif choice == "21":
                 self._quant_projects()
+            elif choice == "22":
+                self._run_swarm_analysis()
+            elif choice == "23":
+                self.swarm.print_leaderboard()
+                Prompt.ask("\nPress Enter to continue")
     
+    def _run_swarm_analysis(self):
+        """Run 12 AI trading agents on a ticker with adaptive weighting."""
+        DisplayManager.show_header()
+        console.print("[bold cyan]🐝 SWARM INTELLIGENCE[/bold cyan] [dim](12 adaptive AI agents)[/dim]\n")
+
+        ticker = Prompt.ask("Enter ticker to analyze", default="AAPL").upper().strip()
+        rounds = 3
+
+        console.print(f"\n[cyan]Analyzing {ticker} with {len(self.swarm.agents)} agents ({rounds} debate rounds)...[/cyan]")
+
+        # Fetch indicators
+        try:
+            bars = DataManager.fetch_data(ticker, '5d', '1m')
+            if bars is None or bars.empty:
+                console.print("[red]Could not fetch data for {ticker}[/red]")
+                Prompt.ask("\nPress Enter to return")
+                return
+            indicators = TechnicalAnalyzer.calculate_indicators(bars)
+            if indicators is None:
+                console.print("[red]Could not calculate indicators[/red]")
+                Prompt.ask("\nPress Enter to return")
+                return
+            try:
+                current_price = DataManager.get_realtime_price(ticker)
+                if current_price:
+                    indicators.price = float(current_price)
+                    indicators.close = float(current_price)
+            except Exception: pass
+        except Exception as e:
+            console.print(f"[red]Data error: {e}[/red]")
+            Prompt.ask("\nPress Enter to return")
+            return
+
+        result = self.swarm.analyze(ticker, indicators, rounds=rounds)
+
+        # Display consensus
+        action = result.get('action', 'HOLD')
+        conf = result.get('confidence', 0)
+        breakdown = result.get('breakdown', {})
+        reasons = result.get('reasons', [])
+
+        color = "green" if action == "BUY" else ("red" if action == "SELL" else "yellow")
+        console.print(f"\n[bold {color}]{'='*50}[/bold {color}]")
+        console.print(f"[bold {color}]CONSENSUS: {action} — {conf:.1f}% confidence[/bold {color}]")
+        console.print(f"[bold {color}]{'='*50}[/bold {color}]")
+
+        if breakdown:
+            console.print(f"\n  [green]BUY:  {breakdown.get('buy', 0):.1f}%[/green]  |  "
+                          f"[red]SELL: {breakdown.get('sell', 0):.1f}%[/red]  |  "
+                          f"[yellow]HOLD: {breakdown.get('hold', 0):.1f}%[/yellow]")
+
+        if reasons:
+            console.print(f"\n[bold]Top reasons:[/bold]")
+            for r in reasons[:5]:
+                console.print(f"  - {r}")
+
+        # Agent leaderboard
+        console.print()
+        self.swarm.print_leaderboard()
+
+        # Offer to execute
+        if action in ('BUY', 'SELL') and conf >= 60:
+            execute = Prompt.ask(f"\nExecute {action} on {ticker}?", choices=["y", "n"], default="n")
+            if execute == "y":
+                # Use fallback analysis for SL/TP levels
+                signal = self.analyzer._fallback_analysis(
+                    ticker, indicators, float(self.config.get('account_size', 100000)),
+                    is_day_trading=True)
+                if signal:
+                    result = self.auto_trader.execute(
+                        ticker, action, indicators.price,
+                        signal.stop_loss, signal.take_profit_1, conf)
+                    if result:
+                        console.print(f"[bold green]Trade executed: {action} {ticker}[/bold green]")
+                    else:
+                        console.print("[yellow]Trade not executed (sizing/gate)[/yellow]")
+
+        Prompt.ask("\nPress Enter to return")
+
     def _quant_projects(self):
         """Quantitative simulation lab — 11 professional quant models."""
         while True:
