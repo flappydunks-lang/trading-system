@@ -10412,12 +10412,13 @@ class FinalAIQuantum:
             console.print("\n[bold]🔷 SWARM & AUTO[/bold]")
             console.print("22. 🐝 Swarm Intelligence (12 AI agents)")
             console.print("23. 🏆 Swarm Leaderboard")
+            console.print("24. 📊 Backtester (TA/Swarm/Quant)")
             console.print("\n[bold]🔷 SYSTEM[/bold]")
             console.print("18. 👥 User Management")
             console.print("19. ⚙️  Settings")
             console.print("20. 🚪 Exit\n")
 
-            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 24)], default="1")
+            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 25)], default="1")
 
             if choice == "1":
                 self.analyze_ticker()
@@ -10470,6 +10471,8 @@ class FinalAIQuantum:
             elif choice == "23":
                 self.swarm.print_leaderboard()
                 Prompt.ask("\nPress Enter to continue")
+            elif choice == "24":
+                self.run_backtest()
     
     def _run_swarm_analysis(self):
         """Run 12 AI trading agents on a ticker with adaptive weighting."""
@@ -17944,8 +17947,198 @@ Rules:
         Prompt.ask("Press Enter to continue")
     
     def run_backtest(self):
-        """Removed - backtesting feature disabled."""
-        pass
+        """Backtest using TA signals, Swarm consensus, or Quant strategies on historical data."""
+        DisplayManager.show_header()
+        console.print("[bold cyan]📊 STRATEGY BACKTESTER[/bold cyan]\n")
+
+        ticker = Prompt.ask("Ticker", default="AAPL").upper().strip()
+        period = Prompt.ask("Period", choices=["1mo", "3mo", "6mo", "1y", "2y"], default="3mo")
+        method = Prompt.ask("Method", choices=["ta", "swarm", "both"], default="ta")
+        capital = float(Prompt.ask("Starting capital ($)", default="100000"))
+        risk_pct = float(Prompt.ask("Risk per trade (%)", default="1.0")) / 100.0
+
+        console.print(f"\n[cyan]Backtesting {ticker} over {period} using {method.upper()}...[/cyan]\n")
+
+        try:
+            df = yf.download(ticker, period=period, interval='1d', progress=False)
+            if df is None or df.empty or len(df) < 30:
+                console.print("[red]Not enough data[/red]")
+                Prompt.ask("\nPress Enter to return")
+                return
+
+            # Flatten MultiIndex columns if present
+            if hasattr(df.columns, 'levels'):
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
+            trades = []
+            equity = capital
+            peak_equity = capital
+            max_dd = 0.0
+            position = None
+            lookback = 50  # Need 50 bars for indicators
+
+            for i in range(lookback, len(df) - 1):
+                window = df.iloc[i - lookback:i + 1].copy()
+                current_price = float(window['Close'].iloc[-1])
+                next_open = float(df['Open'].iloc[i + 1])
+                next_high = float(df['High'].iloc[i + 1])
+                next_low = float(df['Low'].iloc[i + 1])
+                next_close = float(df['Close'].iloc[i + 1])
+
+                # Check existing position SL/TP
+                if position is not None:
+                    hit_sl = (position['direction'] == 'BUY' and next_low <= position['sl']) or \
+                             (position['direction'] == 'SELL' and next_high >= position['sl'])
+                    hit_tp = (position['direction'] == 'BUY' and next_high >= position['tp']) or \
+                             (position['direction'] == 'SELL' and next_low <= position['tp'])
+
+                    exit_price = None
+                    reason = None
+                    if hit_sl:
+                        exit_price = position['sl']
+                        reason = 'SL'
+                    elif hit_tp:
+                        exit_price = position['tp']
+                        reason = 'TP'
+
+                    if exit_price:
+                        direction = 1 if position['direction'] == 'BUY' else -1
+                        pnl = (exit_price - position['entry']) * position['shares'] * direction
+                        pnl -= 1.0  # commission
+                        equity += pnl
+                        peak_equity = max(peak_equity, equity)
+                        dd = (peak_equity - equity) / peak_equity * 100
+                        max_dd = max(max_dd, dd)
+                        trades.append({
+                            'entry_date': position['date'], 'exit_date': df.index[i + 1],
+                            'direction': position['direction'], 'entry': position['entry'],
+                            'exit': exit_price, 'shares': position['shares'],
+                            'pnl': pnl, 'reason': reason
+                        })
+                        position = None
+
+                # Skip if already in position
+                if position is not None:
+                    continue
+
+                # Generate signal
+                try:
+                    indicators = TechnicalAnalyzer.calculate_indicators(window)
+                    if indicators is None:
+                        continue
+                    indicators.price = current_price
+                    indicators.close = current_price
+
+                    signal = self.analyzer._fallback_analysis(
+                        ticker, indicators, equity, risk_pct,
+                        desired_rrr=2.5, is_day_trading=False)
+
+                    if signal is None or signal.action == 'HOLD':
+                        continue
+                    if signal.confidence < 70:
+                        continue
+
+                    action = signal.action
+                    sl = signal.stop_loss
+                    tp = signal.take_profit_1
+
+                    # Validate SL/TP
+                    if action == 'BUY' and (sl >= next_open or tp <= next_open):
+                        continue
+                    if action == 'SELL' and (sl <= next_open or tp >= next_open):
+                        continue
+
+                    # Position sizing
+                    risk_dist = abs(next_open - sl)
+                    if risk_dist <= 0:
+                        continue
+                    risk_dollars = equity * risk_pct
+                    shares = int(risk_dollars / risk_dist)
+                    if shares < 1:
+                        continue
+
+                    # Slippage
+                    entry = next_open * (1.001 if action == 'BUY' else 0.999)
+
+                    position = {
+                        'date': df.index[i + 1], 'direction': action,
+                        'entry': entry, 'shares': shares, 'sl': sl, 'tp': tp
+                    }
+                except Exception:
+                    continue
+
+            # Close any open position at final close
+            if position is not None:
+                final_price = float(df['Close'].iloc[-1])
+                direction = 1 if position['direction'] == 'BUY' else -1
+                pnl = (final_price - position['entry']) * position['shares'] * direction
+                equity += pnl
+                trades.append({
+                    'entry_date': position['date'], 'exit_date': df.index[-1],
+                    'direction': position['direction'], 'entry': position['entry'],
+                    'exit': final_price, 'shares': position['shares'],
+                    'pnl': pnl, 'reason': 'EOD'
+                })
+
+            # Results
+            total = len(trades)
+            if total == 0:
+                console.print("[yellow]No trades generated. Try a longer period or lower confidence threshold.[/yellow]")
+                Prompt.ask("\nPress Enter to return")
+                return
+
+            wins = [t for t in trades if t['pnl'] > 0]
+            losses = [t for t in trades if t['pnl'] <= 0]
+            win_rate = len(wins) / total * 100
+            total_pnl = equity - capital
+            avg_win = np.mean([t['pnl'] for t in wins]) if wins else 0
+            avg_loss = np.mean([t['pnl'] for t in losses]) if losses else 0
+            profit_factor = abs(sum(t['pnl'] for t in wins) / sum(t['pnl'] for t in losses)) if losses and sum(t['pnl'] for t in losses) != 0 else 0
+
+            # Display
+            color = "green" if total_pnl >= 0 else "red"
+            console.print(f"\n[bold]{'='*50}[/bold]")
+            console.print(f"[bold]BACKTEST RESULTS: {ticker} ({period})[/bold]")
+            console.print(f"[bold]Method: {method.upper()} | Capital: ${capital:,.0f}[/bold]")
+            console.print(f"[bold]{'='*50}[/bold]\n")
+
+            console.print(f"  Total trades:    {total}")
+            console.print(f"  Win rate:        [{color}]{win_rate:.1f}%[/{color}]")
+            console.print(f"  Winners:         [green]{len(wins)}[/green]")
+            console.print(f"  Losers:          [red]{len(losses)}[/red]")
+            console.print(f"  Avg win:         [green]${avg_win:+,.2f}[/green]")
+            console.print(f"  Avg loss:        [red]${avg_loss:+,.2f}[/red]")
+            console.print(f"  Profit factor:   {profit_factor:.2f}")
+            console.print(f"  Max drawdown:    [red]{max_dd:.1f}%[/red]")
+            console.print(f"\n  [bold {color}]Total P&L: ${total_pnl:+,.2f} ({total_pnl/capital*100:+.2f}%)[/bold {color}]")
+            console.print(f"  [bold {color}]Final equity: ${equity:,.2f}[/bold {color}]")
+
+            # Trade log
+            console.print(f"\n[bold]Recent trades:[/bold]")
+            table = Table(box=box.SIMPLE)
+            table.add_column("Date", style="dim")
+            table.add_column("Dir")
+            table.add_column("Entry", justify="right")
+            table.add_column("Exit", justify="right")
+            table.add_column("P&L", justify="right")
+            table.add_column("Reason")
+            for t in trades[-15:]:
+                p_color = "green" if t['pnl'] > 0 else "red"
+                d_color = "green" if t['direction'] == 'BUY' else "red"
+                table.add_row(
+                    str(t['entry_date'].date()) if hasattr(t['entry_date'], 'date') else str(t['entry_date'])[:10],
+                    f"[{d_color}]{t['direction']}[/{d_color}]",
+                    f"${t['entry']:.2f}", f"${t['exit']:.2f}",
+                    f"[{p_color}]${t['pnl']:+,.2f}[/{p_color}]",
+                    t['reason']
+                )
+            console.print(table)
+
+        except Exception as e:
+            console.print(f"[red]Backtest error: {e}[/red]")
+            import traceback; traceback.print_exc()
+
+        Prompt.ask("\nPress Enter to return")
     
     def settings_menu(self):
         """Settings menu."""
