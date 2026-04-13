@@ -7852,13 +7852,11 @@ class AIAnalyzer:
         else:
             bearish_signals.append("Price < SMA200")
 
-        # RSI extremes - STRONG bearish signal when overbought
+        # RSI extremes — single count each
         if indicators.rsi_14 < 30:
             bullish_signals.append(f"RSI(14) oversold ({indicators.rsi_14})")
         elif indicators.rsi_14 > 70:
-            # Overbought is a strong bearish signal
             bearish_signals.append(f"RSI(14) overbought ({indicators.rsi_14})")
-            bearish_signals.append(f"RSI(14) overbought ({indicators.rsi_14})")  # Double weight
 
         # MACD
         if indicators.macd > indicators.macd_signal:
@@ -7867,21 +7865,20 @@ class AIAnalyzer:
             bearish_signals.append("MACD < Signal")
 
         # ADX strength
+        # ADX — strong trend is neutral (confirms existing direction), don't penalize weak
         if indicators.adx and indicators.adx > 25:
-            bullish_signals.append(f"ADX indicates strong trend ({indicators.adx})")
-        else:
-            bearish_signals.append(f"ADX weak or flat ({indicators.adx})")
+            neutral.append(f"ADX strong trend ({indicators.adx})")
 
-        # Volume
-        if indicators.volume_ratio and indicators.volume_ratio > 1.0:
-            bullish_signals.append(f"Volume above average ({indicators.volume_ratio:.2f}x)")
-        else:
-            bearish_signals.append(f"Low volume ({indicators.volume_ratio:.2f}x)")
+        # Volume — only signal when notably high
+        if indicators.volume_ratio and indicators.volume_ratio > 1.5:
+            bullish_signals.append(f"High volume ({indicators.volume_ratio:.2f}x)")
 
-        # Merge pattern recognitions if available (candles / patterns)
-        if hasattr(indicators, 'mfi') and indicators.mfi and indicators.mfi > 80:
-            bearish_signals.append(f"MFI high ({indicators.mfi})")
-            bearish_signals.append(f"MFI high ({indicators.mfi})")  # Double weight
+        # MFI — overbought/oversold, single count
+        if hasattr(indicators, 'mfi') and indicators.mfi:
+            if indicators.mfi > 80:
+                bearish_signals.append(f"MFI overbought ({indicators.mfi})")
+            elif indicators.mfi < 20:
+                bullish_signals.append(f"MFI oversold ({indicators.mfi})")
 
         # PATTERN DETECTION
         try:
@@ -7954,26 +7951,15 @@ class AIAnalyzer:
         
         if indicators.rsi_14 > 72:
             extreme_overbought = True
-            bearish_signals.append(f"RSI OVERBOUGHT ({indicators.rsi_14})")
-            bearish_signals.append(f"RSI OVERBOUGHT ({indicators.rsi_14})")  # Triple weight
-            bearish_signals.append(f"RSI OVERBOUGHT ({indicators.rsi_14})")
-            
-            # Add additional bearish signals when overbought
+            bearish_signals.append(f"RSI extreme overbought ({indicators.rsi_14})")
             if indicators.williams_r and indicators.williams_r > -10:
-                bearish_signals.append("Williams %R also overbought")
-            if indicators.mfi and indicators.mfi > 70:
-                bearish_signals.append("MFI confirms overbought")
-        
+                bearish_signals.append("Williams %R confirms overbought")
+
         if indicators.rsi_14 < 28:
             extreme_oversold = True
-            bullish_signals.append(f"RSI OVERSOLD ({indicators.rsi_14})")
-            bullish_signals.append(f"RSI OVERSOLD ({indicators.rsi_14})")  # Triple weight
-            bullish_signals.append(f"RSI OVERSOLD ({indicators.rsi_14})")
-            
+            bullish_signals.append(f"RSI extreme oversold ({indicators.rsi_14})")
             if indicators.williams_r and indicators.williams_r < -90:
-                bullish_signals.append("Williams %R also oversold")
-            if indicators.mfi and indicators.mfi < 30:
-                bullish_signals.append("MFI confirms oversold")
+                bullish_signals.append("Williams %R confirms oversold")
         
         # If overbought + pattern detected = VERY HIGH confidence SELL
         if extreme_overbought and pattern_signals:
@@ -8006,54 +7992,35 @@ class AIAnalyzer:
         except Exception:
             pass
         
-        # Volume confirmation (require above-average volume)
-        volume_confirmed = indicators.volume_ratio > 1.2  # Volume 20% above average
-        if not volume_confirmed:
-            bearish_signals.append("⚠ Low volume (no conviction)")
+        # Volume confirmation — informational only, don't bias signal direction
+        volume_confirmed = indicators.volume_ratio > 1.2 if indicators.volume_ratio else False
         
-        # Decide action from signal counts - ALWAYS make a decision (never HOLD)
+        # Decide action: require clear edge (signal_diff >= 3) to trade.
+        # Equal or near-equal signals = HOLD (no edge, don't force a trade).
         signal_diff = abs(len(bullish_signals) - len(bearish_signals))
-        
-        if len(bullish_signals) > len(bearish_signals):
+
+        if len(bullish_signals) > len(bearish_signals) and signal_diff >= 3:
             action = "BUY"
-            base_conf = 60 + (signal_diff * 5)
-            if extreme_oversold:
-                base_conf += 10
-            
-            # PENALTY if buying against trend or momentum
-            if price_above_sma20 == False or price_above_sma50 == False:
-                base_conf -= 15
-                bullish_signals.append("⚠ COUNTER-TREND: Price below SMAs")
-            if momentum_bearish:
-                base_conf -= 10
-                bullish_signals.append("⚠ BEARISH MOMENTUM: Recent downtrend")
-            
-            confidence = min(85, base_conf)
-        elif len(bearish_signals) > len(bullish_signals):
+            base_conf = 55 + (signal_diff * 4)
+            if extreme_oversold: base_conf += 8
+            # Penalty if counter-trend
+            if price_above_sma20 == False and price_above_sma50 == False:
+                base_conf -= 12
+            if momentum_bearish: base_conf -= 8
+            confidence = min(92, base_conf)
+        elif len(bearish_signals) > len(bullish_signals) and signal_diff >= 3:
             action = "SELL"
-            base_conf = 60 + (signal_diff * 5)
-            if extreme_overbought:
-                base_conf += 10
-            
-            # PENALTY if selling against trend or momentum  
-            if price_above_sma20 == True or price_above_sma50 == True:
-                base_conf -= 15
-                bearish_signals.append("⚠ COUNTER-TREND: Price above SMAs")
-            if momentum_bullish:
-                base_conf -= 10
-                bearish_signals.append("⚠ BULLISH MOMENTUM: Recent uptrend")
-            
-            confidence = min(85, base_conf)
+            base_conf = 55 + (signal_diff * 4)
+            if extreme_overbought: base_conf += 8
+            # Penalty if counter-trend
+            if price_above_sma20 == True and price_above_sma50 == True:
+                base_conf -= 12
+            if momentum_bullish: base_conf -= 8
+            confidence = min(92, base_conf)
         else:
-            # Equal signals - use RSI to break tie (ALWAYS pick a side)
-            if indicators.rsi_14 >= 50:
-                action = "BUY"
-                confidence = 55  # Lower confidence for neutral signals
-                bullish_signals.append(f"RSI slightly bullish ({indicators.rsi_14:.0f})")
-            else:
-                action = "SELL"
-                confidence = 55  # Lower confidence for neutral signals
-                bearish_signals.append(f"RSI slightly bearish ({indicators.rsi_14:.0f})")
+            # No clear edge — HOLD (don't force trades with no edge)
+            action = "HOLD"
+            confidence = 40
         
         entry_price = indicators.price
         
@@ -8086,24 +8053,27 @@ class AIAnalyzer:
         else:
             target_move_pct = None
         
-        # Default stop loss uses ATR multiples; MUCH tighter for day trading to limit losses
+        # Stop loss: 1.2x ATR for day trading (0.8x was too tight — stopped out on noise),
+        # 2x ATR for swing. Target 2.5:1 R:R for day trading, 2:1 for swing.
         if is_day_trading:
-            # Day trading: use 0.8x ATR (tighter stops to prevent drawdown)
-            stop_loss = entry_price - indicators.atr * 0.8 if action == "BUY" else entry_price + indicators.atr * 0.8
+            sl_mult = 1.2
+            stop_loss = entry_price - indicators.atr * sl_mult if action == "BUY" else entry_price + indicators.atr * sl_mult
         else:
             stop_loss = entry_price - indicators.atr * 2 if action == "BUY" else entry_price + indicators.atr * 2
 
-        # Add quant metrics to supporting signals
+        # Add quant metrics to the CORRECT side based on their values
         try:
             if quant_metrics:
                 if 'sharpe' in quant_metrics:
-                    bullish_signals.append(f"Sharpe Ratio: {quant_metrics['sharpe']:.2f}")
-                if 'z_score' in quant_metrics:
-                    bullish_signals.append(f"Z-Score: {quant_metrics['z_score']:.2f}")
+                    if quant_metrics['sharpe'] > 1.0:
+                        bullish_signals.append(f"Sharpe Ratio: {quant_metrics['sharpe']:.2f}")
+                    elif quant_metrics['sharpe'] < -0.5:
+                        bearish_signals.append(f"Negative Sharpe: {quant_metrics['sharpe']:.2f}")
                 if 'buy_pressure' in quant_metrics:
-                    bullish_signals.append(f"Buy Pressure: {quant_metrics['buy_pressure']:.0f}%")
-                if 'volume_spike' in quant_metrics:
-                    bullish_signals.append(f"Volume Spike: {quant_metrics['volume_spike']:.1f}x")
+                    if quant_metrics['buy_pressure'] > 60:
+                        bullish_signals.append(f"Buy pressure: {quant_metrics['buy_pressure']:.0f}%")
+                    elif quant_metrics['buy_pressure'] < 40:
+                        bearish_signals.append(f"Sell pressure: {quant_metrics['buy_pressure']:.0f}%")
         except Exception:
             pass
         
@@ -8111,12 +8081,12 @@ class AIAnalyzer:
         risk_distance = abs(entry_price - stop_loss)
         direction = 1 if action == "BUY" else -1
         
-        if is_day_trading and target_move_pct:
-            # Day trading: set TPs based on realistic 5-20min price movement
-            expected_move = entry_price * target_move_pct
-            tp1 = entry_price + direction * expected_move * 0.5  # 50% of expected move
-            tp2 = entry_price + direction * expected_move       # Full expected move
-            tp3 = entry_price + direction * expected_move * 1.5 # Extended target
+        if is_day_trading:
+            # Day trading: 2.5:1 R:R based on ATR stop distance
+            # TP1=1.5R (quick scalp), TP2=2.5R (standard), TP3=3.5R (runner)
+            tp1 = entry_price + direction * risk_distance * 1.5
+            tp2 = entry_price + direction * risk_distance * 2.5
+            tp3 = entry_price + direction * risk_distance * 3.5
             bullish_signals.append(f"TP targets: 5-20min profit optimization (${expected_move:.2f} move)")
         elif desired_rrr and risk_distance > 0 and action in ("BUY", "SELL"):
             tp1 = entry_price + direction * (risk_distance * desired_rrr)
@@ -8828,20 +8798,516 @@ class DisplayManager:
         console.print(f"           Start{' '*(len(curve)-10)}End\n")
 
 # ==========================================
+# BROKER INTERFACE + IBKR + AUTO TRADER
+# ==========================================
+
+class BrokerInterface:
+    """Abstract base for broker integrations (Alpaca, IBKR, etc.)."""
+
+    def is_ready(self) -> bool: return False
+    def is_paper(self) -> bool: return True
+    def status_line(self) -> str: return "NOT CONFIGURED"
+    def get_account(self) -> Optional[Dict[str, Any]]: return None
+    def is_market_open(self) -> bool: return False
+    def list_positions(self) -> List[Dict[str, Any]]: return []
+    def get_position(self, symbol: str) -> Optional[Dict[str, Any]]: return None
+    def close_position(self, symbol: str) -> bool: return False
+    def submit_bracket_order(self, symbol, qty, side, take_profit, stop_loss) -> Optional[Dict[str, Any]]: return None
+
+    @staticmethod
+    def _canonical_symbol(sym: str) -> str:
+        return str(sym).upper().strip().replace('/', '').replace('-', '').replace('.', '')
+
+    @staticmethod
+    def is_crypto_symbol(ticker: str) -> bool:
+        t = ticker.upper().strip()
+        if t.endswith('-USD') or t.endswith('/USD'): return True
+        s = t.replace('-', '').replace('/', '')
+        if s.endswith('USD') and len(s) >= 6 and '.' not in s: return True
+        return False
+
+
+class IBKRTrader(BrokerInterface):
+    """Interactive Brokers via ib_insync. Connect to TWS on port 7497 (paper) / 7496 (live)."""
+
+    def __init__(self):
+        self._ib = None
+        self._connected = False
+        self._paper = True
+        self._host = os.getenv('IBKR_HOST', '127.0.0.1').strip()
+        self._port = int(os.getenv('IBKR_PORT', '7497').strip())
+        self._client_id = int(os.getenv('IBKR_CLIENT_ID', '10').strip())
+        self._paper = self._port == 7497
+        self._connect()
+
+    def _connect(self):
+        try:
+            import asyncio
+            try: asyncio.get_event_loop()
+            except RuntimeError: asyncio.set_event_loop(asyncio.new_event_loop())
+            from ib_insync import IB
+            for cid in range(self._client_id, self._client_id + 5):
+                try:
+                    ib = IB()
+                    ib.connect(host=self._host, port=self._port, clientId=cid, timeout=10, readonly=False)
+                    ib.sleep(0.5)
+                    if ib.isConnected():
+                        self._ib = ib
+                        self._client_id = cid
+                        break
+                    ib.disconnect()
+                except Exception:
+                    try: ib.disconnect()
+                    except Exception: pass
+                    continue
+            self._connected = self._ib is not None and self._ib.isConnected()
+            if self._connected:
+                accounts = self._ib.managedAccounts()
+                if accounts: self._paper = accounts[0].startswith('DU')
+                try: self._ib.reqMarketDataType(3)
+                except Exception: pass
+                print(f"[IBKR] Connected {'PAPER' if self._paper else 'LIVE'} on {self._host}:{self._port} (account: {accounts[0] if accounts else '?'}, clientId: {self._client_id})")
+            else:
+                print(f"[IBKR] Connection failed to {self._host}:{self._port}. Start TWS and enable API.")
+        except ImportError:
+            print("[IBKR] ib_insync not installed. Run: pip install ib_insync")
+        except Exception as e:
+            print(f"[IBKR] Connection error: {e}")
+            self._connected = False
+
+    def _ensure(self) -> bool:
+        if self._ib and self._ib.isConnected(): return True
+        try: self._connect()
+        except Exception: pass
+        return self._connected
+
+    def is_ready(self): return self._ib is not None and self._ib.isConnected()
+    def is_paper(self): return self._paper
+
+    def status_line(self):
+        if not self.is_ready(): return "IBKR: NOT CONNECTED (start TWS, enable API on port 7497)"
+        env = "PAPER" if self._paper else "LIVE"
+        accts = self._ib.managedAccounts()
+        return f"IBKR: {env} (account {accts[0] if accts else '?'} on {self._host}:{self._port})"
+
+    def get_account(self):
+        if not self._ensure(): return None
+        try:
+            summary = self._ib.accountSummary()
+            r = {'cash': 0.0, 'equity': 0.0, 'buying_power': 0.0, 'status': 'active'}
+            for item in summary:
+                if item.tag not in ('TotalCashValue', 'NetLiquidation', 'BuyingPower'): continue
+                try: val = float(item.value)
+                except (ValueError, TypeError): continue
+                if item.tag == 'TotalCashValue': r['cash'] = val
+                elif item.tag == 'NetLiquidation': r['equity'] = val
+                elif item.tag == 'BuyingPower': r['buying_power'] = val
+            return r
+        except Exception as e:
+            logger.warning(f"[IBKR] get_account: {e}")
+            return None
+
+    def is_market_open(self):
+        try:
+            from zoneinfo import ZoneInfo
+            et = datetime.now(ZoneInfo('America/New_York'))
+            if et.weekday() >= 5: return False
+            return 570 <= et.hour * 60 + et.minute <= 960  # 9:30-16:00
+        except Exception: return True
+
+    def list_positions(self):
+        if not self._ensure(): return []
+        try:
+            result = []
+            for pos in self._ib.positions():
+                qty = float(pos.position)
+                if qty == 0: continue
+                avg = float(pos.avgCost)
+                sym = pos.contract.symbol
+                if pos.contract.secType == 'CRYPTO': sym = f"{sym}-USD"
+                upl, uplpc = 0.0, 0.0
+                try:
+                    self._ib.qualifyContracts(pos.contract)
+                    [tk] = self._ib.reqTickers(pos.contract)
+                    self._ib.sleep(1)
+                    mp = tk.marketPrice()
+                    if mp and mp > 0 and str(mp) != 'nan':
+                        upl = (mp - avg) * qty
+                        notional = abs(qty) * avg
+                        uplpc = upl / notional if notional else 0
+                except Exception: pass
+                result.append({'symbol': sym, 'qty': abs(qty), 'side': 'long' if qty > 0 else 'short',
+                               'avg_entry_price': avg, 'unrealized_pl': upl, 'unrealized_plpc': uplpc})
+            return result
+        except Exception as e:
+            logger.warning(f"[IBKR] list_positions: {e}")
+            return []
+
+    def get_position(self, symbol):
+        canon = self._canonical_symbol(symbol)
+        for p in self.list_positions():
+            if self._canonical_symbol(p['symbol']) == canon: return p
+        return None
+
+    def close_position(self, symbol):
+        if not self._ensure(): return False
+        try:
+            from ib_insync import Stock, MarketOrder
+            pos = self.get_position(symbol)
+            if not pos: return False
+            contract = self._make_contract(symbol)
+            if not contract: return False
+            self._ib.qualifyContracts(contract)
+            action = 'SELL' if pos['side'] == 'long' else 'BUY'
+            order = MarketOrder(action, float(pos['qty']))
+            order.tif = 'GTC' if self.is_crypto_symbol(symbol) else 'DAY'
+            self._ib.placeOrder(contract, order)
+            self._ib.sleep(2)
+            return True
+        except Exception as e:
+            logger.warning(f"[IBKR] close_position {symbol}: {e}")
+            return False
+
+    def submit_bracket_order(self, symbol, qty, side, take_profit, stop_loss):
+        if not self._ensure(): return None
+        try:
+            from ib_insync import MarketOrder, LimitOrder, StopOrder
+            contract = self._make_contract(symbol)
+            if not contract: return None
+            self._ib.qualifyContracts(contract)
+            action = side.upper()
+            if action not in ('BUY', 'SELL'):
+                action = 'BUY' if side.lower() in ('buy', 'long') else 'SELL'
+            exit_action = 'SELL' if action == 'BUY' else 'BUY'
+            is_crypto = self.is_crypto_symbol(symbol)
+            qty = float(qty) if is_crypto else int(qty)
+            # Aggressive limit entry (ask+0.02 for BUY, bid-0.02 for SELL)
+            entry_price = None
+            try:
+                [tk] = self._ib.reqTickers(contract)
+                self._ib.sleep(1)
+                if action == 'BUY':
+                    ask = tk.ask if tk.ask and tk.ask > 0 else (tk.marketPrice() if tk.marketPrice() else 0)
+                    if ask > 0: entry_price = round(ask + 0.02, 2)
+                else:
+                    bid = tk.bid if tk.bid and tk.bid > 0 else (tk.marketPrice() if tk.marketPrice() else 0)
+                    if bid > 0: entry_price = round(bid - 0.02, 2)
+            except Exception: pass
+            parent = LimitOrder(action, qty, entry_price) if entry_price and entry_price > 0 else MarketOrder(action, qty)
+            parent.orderId = self._ib.client.getReqId()
+            parent.transmit = False
+            parent.tif = 'GTC' if is_crypto else 'DAY'
+            tp = LimitOrder(exit_action, qty, round(float(take_profit), 2))
+            tp.orderId = self._ib.client.getReqId()
+            tp.parentId = parent.orderId
+            tp.transmit = False
+            tp.tif = 'GTC'
+            sl = StopOrder(exit_action, qty, round(float(stop_loss), 2))
+            sl.orderId = self._ib.client.getReqId()
+            sl.parentId = parent.orderId
+            sl.transmit = True
+            sl.tif = 'GTC'
+            self._ib.placeOrder(contract, parent)
+            self._ib.placeOrder(contract, tp)
+            self._ib.placeOrder(contract, sl)
+            self._ib.sleep(2)
+            return {'id': str(parent.orderId), 'symbol': symbol, 'qty': qty, 'side': action, 'status': 'submitted'}
+        except Exception as e:
+            logger.warning(f"[IBKR] submit_bracket_order {symbol}: {e}")
+            import traceback; traceback.print_exc()
+            return None
+
+    def batch_fetch_prices(self, symbols):
+        prices = {}
+        if not self._ensure(): return prices
+        try:
+            from ib_insync import Stock, Crypto
+            contracts = []
+            sym_list = []
+            for s in symbols:
+                c = self._make_contract(s)
+                if c: contracts.append(c); sym_list.append(s)
+            if not contracts: return prices
+            self._ib.qualifyContracts(*contracts)
+            tickers = self._ib.reqTickers(*contracts)
+            self._ib.sleep(2)
+            for tk, sym in zip(tickers, sym_list):
+                mp = tk.marketPrice()
+                if mp and mp > 0 and str(mp) != 'nan': prices[sym] = float(mp)
+                elif tk.last and tk.last > 0 and str(tk.last) != 'nan': prices[sym] = float(tk.last)
+                elif tk.close and tk.close > 0 and str(tk.close) != 'nan': prices[sym] = float(tk.close)
+        except Exception as e:
+            logger.debug(f"[IBKR] batch_fetch_prices: {e}")
+        return prices
+
+    def _make_contract(self, symbol):
+        try:
+            from ib_insync import Stock, Crypto
+            if self.is_crypto_symbol(symbol):
+                base = symbol.upper().replace('-USD', '').replace('/USD', '')
+                if base.endswith('USD'): base = base[:-3]
+                return Crypto(base, 'PAXOS', 'USD')
+            else:
+                return Stock(symbol.upper().replace('-', '.').strip(), 'SMART', 'USD')
+        except ImportError: return None
+
+    def disconnect(self):
+        if self._ib and self._ib.isConnected(): self._ib.disconnect(); self._connected = False
+
+
+# IBKR price cache (thread-safe read, main-thread write)
+_ibkr_price_cache: Dict[str, Tuple[float, float]] = {}
+
+def _get_ibkr_cached_price(symbol: str) -> Optional[float]:
+    import time as _t
+    entry = _ibkr_price_cache.get(BrokerInterface._canonical_symbol(symbol))
+    if entry is None: return None
+    ts, price = entry
+    return price if _t.time() - ts < 15.0 else None
+
+
+class AutoTrader:
+    """Hands-off trade executor with risk management, position sizing, and daily limits."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.enabled = False
+        self.mode = 'paper'  # 'paper' or 'live'
+        self.daily_trades = 0
+        self.daily_pnl_pct = 0.0
+        self.last_reset_date = ''
+        self.open_positions: Dict[str, Dict] = {}
+        self._load_state()
+
+    @property
+    def max_daily(self): return int((self.bot.config or {}).get('auto_trade_max_daily', 30))
+    @property
+    def max_daily_loss_pct(self): return float((self.bot.config or {}).get('auto_trade_max_daily_loss_pct', 5.0))
+    @property
+    def risk_pct(self): return float((self.bot.config or {}).get('auto_trade_risk_pct', 1.0))
+    @property
+    def min_confidence(self): return float((self.bot.config or {}).get('auto_trade_min_confidence', 80.0))
+    @property
+    def max_open_positions(self): return int((self.bot.config or {}).get('auto_trade_max_open_positions', 8))
+    @property
+    def allow_shorts(self): return bool((self.bot.config or {}).get('auto_trade_allow_shorts', True))
+    @property
+    def max_notional_pct(self): return float((self.bot.config or {}).get('auto_trade_max_notional_pct', 25.0))
+    @property
+    def max_total_exposure_pct(self): return float((self.bot.config or {}).get('auto_trade_max_total_exposure_pct', 80.0))
+    @property
+    def bp_safety_pct(self): return float((self.bot.config or {}).get('auto_trade_bp_safety_pct', 50.0))
+
+    def _load_state(self):
+        try:
+            p = Path('logs/auto_trader_state.json')
+            if p.exists():
+                data = json.loads(p.read_text())
+                self.daily_trades = data.get('daily_trades', 0)
+                self.daily_pnl_pct = data.get('daily_pnl_pct', 0.0)
+                self.last_reset_date = data.get('last_reset_date', '')
+                self.open_positions = data.get('open_positions', {})
+                self.enabled = data.get('enabled', False)
+                self.mode = data.get('mode', 'paper')
+        except Exception: pass
+        self._maybe_reset_day()
+
+    def _save_state(self):
+        try:
+            Path('logs').mkdir(exist_ok=True)
+            Path('logs/auto_trader_state.json').write_text(json.dumps({
+                'daily_trades': self.daily_trades, 'daily_pnl_pct': self.daily_pnl_pct,
+                'last_reset_date': self.last_reset_date, 'open_positions': self.open_positions,
+                'enabled': self.enabled, 'mode': self.mode,
+            }, indent=2))
+        except Exception: pass
+
+    def _maybe_reset_day(self):
+        today = datetime.now().strftime('%Y-%m-%d')
+        if self.last_reset_date != today:
+            self.daily_trades = 0
+            self.daily_pnl_pct = 0.0
+            self.last_reset_date = today
+            self._save_state()
+
+    def record_open(self, ticker, pos_data):
+        self.open_positions[ticker] = pos_data
+        self._save_state()
+
+    def record_close(self, ticker):
+        self.open_positions.pop(ticker, None)
+        self._save_state()
+
+    def record_pnl(self, pct):
+        self.daily_pnl_pct += pct
+        self._save_state()
+
+    def _gate(self, confidence=None):
+        if not self.enabled: return "auto-trade disabled"
+        self._maybe_reset_day()
+        if self.daily_trades >= self.max_daily: return f"daily cap ({self.max_daily})"
+        if self.daily_pnl_pct <= -self.max_daily_loss_pct: return f"daily loss limit ({self.daily_pnl_pct:.2f}%)"
+        if confidence is not None and confidence < self.min_confidence: return f"low confidence ({confidence:.0f}%)"
+        return None
+
+    def status_summary(self):
+        return (f"AutoTrader: {'ON' if self.enabled else 'OFF'} | mode={self.mode} | "
+                f"trades={self.daily_trades}/{self.max_daily} | pnl={self.daily_pnl_pct:+.2f}% | "
+                f"positions={len(self.open_positions)}/{self.max_open_positions}")
+
+    def execute(self, ticker, side, entry, stop_loss, take_profit, confidence, **kwargs):
+        """Size and execute a trade. Returns position dict or None."""
+        reason = self._gate(confidence=confidence)
+        if reason:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): {reason}[/yellow]")
+            return None
+
+        action = "LONG" if str(side).upper() in ("BUY", "LONG") else "SHORT"
+        is_crypto = BrokerInterface.is_crypto_symbol(ticker)
+        if action == "SHORT" and not self.allow_shorts: return None
+        if action == "SHORT" and is_crypto: return None
+
+        account = float((self.bot.config or {}).get('account_size', 100000))
+        entry_f, sl_f, tp_f = float(entry), float(stop_loss), float(take_profit)
+        if entry_f <= 0: return None
+
+        # Enforce minimum stop distance (1.2% for day trading)
+        min_stop_pct = 1.2
+        per_share_risk = abs(entry_f - sl_f)
+        floor_risk = entry_f * (min_stop_pct / 100.0)
+        if per_share_risk < floor_risk:
+            per_share_risk = floor_risk
+            if action == "LONG":
+                sl_f = entry_f - per_share_risk
+                tp_f = entry_f + per_share_risk * 2.5  # 2.5:1 R:R
+            else:
+                sl_f = entry_f + per_share_risk
+                tp_f = entry_f - per_share_risk * 2.5
+            stop_loss, take_profit = sl_f, tp_f
+
+        if per_share_risk <= 0: return None
+
+        # Position sizing: risk-based
+        risk_dollars = account * (self.risk_pct / 100.0)
+        risk_qty = risk_dollars / per_share_risk
+
+        # Notional cap per position
+        max_notional = account * (self.max_notional_pct / 100.0)
+        notional_qty = max_notional / entry_f
+
+        # Total exposure cap
+        existing = sum(abs(float(p.get('qty', 0)) * float(p.get('entry', 0))) for p in self.open_positions.values())
+        max_total = account * (self.max_total_exposure_pct / 100.0)
+        remaining = max(0, max_total - existing)
+        if remaining <= 0:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): exposure cap reached[/yellow]")
+            return None
+        exposure_qty = remaining / entry_f
+
+        # Buying power cap (live mode)
+        bp_qty = float('inf')
+        if self.mode == 'live':
+            try:
+                broker = getattr(self.bot, 'broker', None)
+                if broker and broker.is_ready():
+                    acct = broker.get_account()
+                    if acct:
+                        bp = float(acct.get('buying_power', 0) or 0)
+                        bp_qty = max(0, bp * (self.bp_safety_pct / 100.0) / entry_f)
+            except Exception: pass
+
+        final_qty = min(risk_qty, notional_qty, exposure_qty, bp_qty)
+        if is_crypto:
+            position_size = round(max(final_qty, 0.0), 6)
+            if position_size * entry_f < 10: return None
+        else:
+            position_size = max(0, int(final_qty))
+            if position_size < 1: return None
+
+        broker_order_id = None
+        channel = "PAPER"
+
+        if self.mode == 'paper':
+            try:
+                self.bot.paper_trading.open_trade(ticker, "BUY" if action == "LONG" else "SELL",
+                    entry_f, sl_f, tp_f, position_size)
+            except Exception as e:
+                console.print(f"[red]AutoTrader paper error: {e}[/red]")
+                return None
+        else:
+            try:
+                broker = getattr(self.bot, 'broker', None)
+                if not broker or not broker.is_ready():
+                    console.print("[red]AutoTrader LIVE skipped: broker not ready[/red]")
+                    return None
+                resp = broker.submit_bracket_order(
+                    symbol=ticker, qty=position_size,
+                    side="buy" if action == "LONG" else "sell",
+                    take_profit=tp_f, stop_loss=sl_f)
+                if resp is None:
+                    console.print(f"[red]AutoTrader: broker order failed for {ticker}[/red]")
+                    return None
+                broker_order_id = resp.get('id')
+            except Exception as e:
+                console.print(f"[red]AutoTrader order error ({ticker}): {e}[/red]")
+                return None
+            channel = "LIVE"
+
+        self.daily_trades += 1
+        self._save_state()
+
+        # Log trade
+        try:
+            Path('logs').mkdir(exist_ok=True)
+            with open('logs/auto_trades.jsonl', 'a') as f:
+                f.write(json.dumps({'time': datetime.now().isoformat(), 'ticker': ticker, 'action': action,
+                    'entry': entry_f, 'stop_loss': sl_f, 'take_profit': tp_f, 'size': position_size,
+                    'confidence': confidence, 'channel': channel}) + '\n')
+        except Exception: pass
+
+        result = {'entry_price': entry_f, 'stop_loss': sl_f, 'take_profit': tp_f,
+                  'position_side': action, 'position_size': position_size,
+                  'channel': channel, 'broker_order_id': broker_order_id, 'is_crypto': is_crypto}
+
+        # Telegram notification
+        try:
+            if hasattr(self.bot, 'notifier') and self.bot.notifier:
+                msg = (f"AutoTrader {action} {ticker}\n"
+                       f"Entry ${entry_f:.2f} | SL ${sl_f:.2f} | TP ${tp_f:.2f}\n"
+                       f"Size: {position_size} | Conf: {confidence:.0f}% | {channel}")
+                self.bot.notifier.send(msg)
+        except Exception: pass
+
+        console.print(f"[bold green]AutoTrader {action} {ticker}: {position_size} @ ${entry_f:.2f} "
+                      f"SL ${sl_f:.2f} TP ${tp_f:.2f} ({channel})[/bold green]")
+        return result
+
+
+# ==========================================
 # MAIN APPLICATION
 # ==========================================
 
 class FinalAIQuantum:
     """Main application controller."""
-    
+
     def __init__(self):
         self.config = None
         self.api_key = None
         self.analyzer = None
         self.theme_researcher = None
         self.scanner = None
-        self.paper_trading = PaperTradingManager()  # Initialize paper trading
-        self.current_user = None  # Track logged in user
+        self.paper_trading = PaperTradingManager()
+        self.broker = self._init_broker()
+        self.auto_trader = AutoTrader(self)
+        self.current_user = None
+
+    @staticmethod
+    def _init_broker() -> BrokerInterface:
+        choice = os.getenv('BROKER', 'alpaca').strip().lower()
+        if choice in ('ibkr', 'ib', 'interactive'):
+            print("[*] Broker: IBKR (Interactive Brokers)")
+            return IBKRTrader()
+        return BrokerInterface()  # Stub if no broker configured
     
     def _validate_and_setup_api_keys(self):
         """Check for required API keys and prompt user to enter them if missing."""
