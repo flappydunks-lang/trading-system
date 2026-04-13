@@ -8237,7 +8237,6 @@ class AIAnalyzer:
             tp1 = entry_price + direction * risk_distance * 1.5
             tp2 = entry_price + direction * risk_distance * 2.5
             tp3 = entry_price + direction * risk_distance * 3.5
-            bullish_signals.append(f"TP targets: 5-20min profit optimization (${expected_move:.2f} move)")
         elif desired_rrr and risk_distance > 0 and action in ("BUY", "SELL"):
             tp1 = entry_price + direction * (risk_distance * desired_rrr)
             tp2 = entry_price + direction * (risk_distance * desired_rrr * 1.5)
