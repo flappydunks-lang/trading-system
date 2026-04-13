@@ -5054,31 +5054,35 @@ class TwitterAnalyzer:
 
 
 class SECAnalyzer:
-    """Analyzes SEC Edgar filings."""
-    
+    """Delegates to SECEdgarAnalyzer for real filing data. Keeps get_insider_trades
+    which uses yfinance for a quick alternate data source."""
+
     BASE_URL = "https://www.sec.gov"
-    
+
     @staticmethod
     def get_recent_filings(ticker: str, limit: int = 5) -> List[SECFiling]:
-        """Get recent SEC filings."""
-        filings = []
+        """Get recent SEC filings — delegates to real SECEdgarAnalyzer implementation."""
         try:
-            console.print(f"[dim]Checking SEC filings for {ticker}...[/dim]")
-            
-            filings.append(SECFiling(
-                form_type="10-K",
-                filing_date=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
-                company=ticker,
-                ticker=ticker,
-                description="Annual Report",
-                url=f"{SECAnalyzer.BASE_URL}/cgi-bin/browse-edgar",
-                key_points=["Check SEC.gov for latest filings"]
-            ))
-            
+            raw = SECEdgarAnalyzer.get_recent_filings(ticker, limit=limit)
+            # SECEdgarAnalyzer returns list of dicts; convert to SECFiling dataclasses
+            filings = []
+            for f in raw[:limit]:
+                if isinstance(f, SECFiling):
+                    filings.append(f)
+                elif isinstance(f, dict):
+                    filings.append(SECFiling(
+                        form_type=f.get('form', f.get('form_type', '?')),
+                        filing_date=f.get('filingDate', f.get('filing_date', '')),
+                        company=f.get('company', ticker),
+                        ticker=ticker,
+                        description=f.get('primaryDocDescription', f.get('description', '')),
+                        url=f.get('url', f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker}"),
+                        key_points=[],
+                    ))
+            return filings
         except Exception as e:
-            logger.error(f"Error fetching SEC filings: {e}")
-        
-        return filings
+            logger.warning(f"SECAnalyzer delegated to SECEdgarAnalyzer failed: {e}")
+            return []
     
     @staticmethod
     def get_insider_trades(ticker: str, limit: int = 10) -> List[InsiderTrade]:
