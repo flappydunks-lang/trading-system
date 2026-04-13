@@ -435,7 +435,7 @@ def page_backtest(parent, app):
 
 def page_monte_carlo(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    card = Card(f, title="Monte Carlo Simulation")
+    card = Card(f, title="Monte Carlo Price Simulation (GBM)")
     card.pack(fill="x", padx=6, pady=6)
     row = ctk.CTkFrame(card, fg_color="transparent")
     row.pack(fill="x", padx=16, pady=(0,14))
@@ -451,29 +451,139 @@ def page_monte_carlo(parent, app):
         def work():
             import numpy as np, yfinance as yf
             n, h = int(sims_e.get()), int(days_e.get())
-            df = yf.download(t, period="1y", interval="1d", progress=False)
-            if hasattr(df.columns, 'levels'): df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            if df is None or len(df)<30: _q.put(("put", "No data")); return
-            closes = df['Close'].values.astype(float)
-            rets = np.diff(np.log(closes))
-            mu, sigma = rets.mean(), rets.std()
-            S0 = closes[-1]
-            paths = S0 * np.exp(np.cumsum((mu-0.5*sigma**2)+sigma*np.random.default_rng().standard_normal((n,h)), axis=1))
-            finals = paths[:,-1]
+
+            # Fetch multi-horizon data
+            _q.put(("put", f"  Fetching market data for {t}..."))
+            df_2y = yf.download(t, period="2y", interval="1d", progress=False)
+            df_3mo = yf.download(t, period="3mo", interval="1d", progress=False)
+            for _df in [df_2y, df_3mo]:
+                if _df is not None and hasattr(_df.columns, 'levels'):
+                    _df.columns = [c[0] if isinstance(c, tuple) else c for c in _df.columns]
+            if df_2y is None or len(df_2y) < 30: _q.put(("put", "Not enough data")); return
+
+            closes_2y = df_2y['Close'].dropna().values.astype(float)
+            lr_2y = np.diff(np.log(closes_2y))
+            vol_2y = float(lr_2y.std() * np.sqrt(252) * 100)
+            mu_2y = float(lr_2y.mean())
+            S0 = closes_2y[-1]
+
+            # 30-day realized vol
+            if df_3mo is not None and not df_3mo.empty:
+                c3 = df_3mo['Close'].dropna().values.astype(float)
+                lr_3mo = np.diff(np.log(c3))
+                lr_30d = lr_3mo[-21:] if len(lr_3mo) >= 21 else lr_3mo
+                vol_30d = float(lr_30d.std() * np.sqrt(252) * 100)
+                mu_30d = float(lr_30d.mean())
+            else:
+                vol_30d, mu_30d = vol_2y, mu_2y
+
+            # Use 2-year drift (safer) + 30-day vol (more current)
+            mu_daily = mu_2y
+            sigma = (vol_30d / 100.0) / np.sqrt(252)
+            mu_ann = (np.exp(mu_daily * 252) - 1) * 100
+            mu_30d_ann = (np.exp(mu_30d * 252) - 1) * 100
+
             _q.put(("clear", None))
-            _q.put(("put", f"  {t} Monte Carlo  |  {n:,} sims  |  {h} days\n"))
-            _q.put(("put", f"  Current Price: ${S0:.2f}\n"))
-            for lbl, pct in [("5th percentile",5),("25th",25),("MEDIAN (50th)",50),("75th",75),("95th",95)]:
+            _q.put(("put", f"  {'='*60}"))
+            _q.put(("put", f"  MONTE CARLO SIMULATION: {t}"))
+            _q.put(("put", f"  {n:,} paths  |  {h}-day horizon  |  GBM model"))
+            _q.put(("put", f"  {'='*60}\n"))
+
+            # Market inputs
+            _q.put(("put", f"  MARKET INPUTS"))
+            _q.put(("put", f"  {'─'*56}"))
+            _q.put(("put", f"  {'Spot Price':<28} ${S0:.2f}"))
+            _q.put(("put", f"  {'2-Year Ann. Volatility':<28} {vol_2y:.1f}%"))
+            _q.put(("put", f"  {'30-Day Realized Vol':<28} {vol_30d:.1f}%  (using this)"))
+            _q.put(("put", f"  {'2-Year Drift (ann.)':<28} {mu_ann:+.1f}%/yr  (using this)"))
+            _q.put(("put", f"  {'30-Day Drift (ann.)':<28} {mu_30d_ann:+.1f}%/yr{'  ** EXTREME' if abs(mu_30d_ann)>40 else ''}"))
+            _q.put(("put", ""))
+
+            # Drift warning
+            if abs(mu_30d_ann) > 40:
+                _q.put(("put", f"  ** 30-day drift is extreme ({mu_30d_ann:+.1f}%/yr)."))
+                _q.put(("put", f"     Using 2-year drift instead (recommended).\n"))
+
+            # Run simulation
+            _q.put(("put", f"  Simulating {n:,} paths..."))
+            rng = np.random.default_rng()
+            drift = mu_daily - 0.5 * sigma**2
+            paths = S0 * np.exp(np.cumsum(drift + sigma * rng.standard_normal((n, h)), axis=1))
+            finals = paths[:, -1]
+            returns_pct = (finals - S0) / S0 * 100
+
+            # Price projections
+            _q.put(("put", f"\n  PRICE PROJECTIONS"))
+            _q.put(("put", f"  {'─'*56}"))
+            for lbl, pct in [("5th  (Deep Bear)",5),("10th (Bear)",10),("25th (Cautious)",25),
+                              ("50th (MEDIAN)",50),("75th (Optimistic)",75),("90th (Bull)",90),("95th (Deep Bull)",95)]:
                 v = np.percentile(finals, pct); c = (v-S0)/S0*100
-                _q.put(("put", f"  {lbl:<20} ${v:>10.2f}  ({c:+.1f}%)"))
-            _q.put(("put", f"\n  Mean:    ${finals.mean():.2f} ({(finals.mean()-S0)/S0*100:+.1f}%)"))
-            _q.put(("put", f"  Prob up:   {(finals>S0).mean()*100:.1f}%"))
-            _q.put(("put", f"  Prob >5%:  {(finals>S0*1.05).mean()*100:.1f}%"))
-            _q.put(("put", f"  Prob <-5%: {(finals<S0*0.95).mean()*100:.1f}%"))
-        bg_run(out, app.status, f"MC: {t}", work)
+                marker = "  <<" if pct == 50 else ""
+                _q.put(("put", f"  {lbl:<24} ${v:>10.2f}   ({c:+.1f}%){marker}"))
+            _q.put(("put", f"\n  {'Mean':.<24} ${finals.mean():>10.2f}   ({(finals.mean()-S0)/S0*100:+.1f}%)"))
+
+            # Risk metrics
+            var_95 = float(np.percentile(returns_pct, 5))
+            cvar_95 = float(returns_pct[returns_pct <= var_95].mean()) if (returns_pct <= var_95).any() else var_95
+            running_max = np.maximum.accumulate(paths, axis=1)
+            dd = (paths - running_max) / running_max * 100
+            max_dd_per = dd.min(axis=1)
+            median_dd = float(np.median(max_dd_per))
+            worst_dd = float(np.percentile(max_dd_per, 5))
+
+            _q.put(("put", f"\n  RISK METRICS"))
+            _q.put(("put", f"  {'─'*56}"))
+            _q.put(("put", f"  {'VaR (95%) — worst loss':<28} {var_95:.2f}%"))
+            _q.put(("put", f"  {'CVaR (95%) — tail avg':<28} {cvar_95:.2f}%"))
+            _q.put(("put", f"  {'Median Max Drawdown':<28} {median_dd:.1f}%"))
+            _q.put(("put", f"  {'5th %ile Max Drawdown':<28} {worst_dd:.1f}%  (worst-case)"))
+
+            # Strategy metrics
+            years = h / 252.0
+            cagr = float((np.median(finals) / S0) ** (1.0 / max(years, 0.01)) - 1) * 100
+            full_paths = np.hstack([np.full((n, 1), S0), paths])
+            dpr = np.diff(np.log(full_paths), axis=1)
+            pm = dpr.mean(axis=1) * 252; ps = dpr.std(axis=1) * np.sqrt(252)
+            sharpe = np.where(ps > 0, (pm - 0.045) / ps, 0)
+            med_sharpe = float(np.median(sharpe))
+
+            _q.put(("put", f"\n  STRATEGY METRICS"))
+            _q.put(("put", f"  {'─'*56}"))
+            _q.put(("put", f"  {'Median CAGR':<28} {cagr:+.1f}%"))
+            _q.put(("put", f"  {'Median Sharpe Ratio':<28} {med_sharpe:.2f}"))
+            _q.put(("put", f"  {'Prob Sharpe > 0':<28} {(sharpe>0).mean()*100:.1f}%"))
+
+            # Probabilities
+            _q.put(("put", f"\n  PROBABILITIES"))
+            _q.put(("put", f"  {'─'*56}"))
+            _q.put(("put", f"  {'Prob price goes UP':<28} {(finals>S0).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob gain > 5%':<28} {(finals>S0*1.05).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob gain > 10%':<28} {(finals>S0*1.10).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob gain > 20%':<28} {(finals>S0*1.20).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob loss > 5%':<28} {(finals<S0*0.95).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob loss > 10%':<28} {(finals<S0*0.90).mean()*100:.1f}%"))
+            _q.put(("put", f"  {'Prob loss > 20%':<28} {(finals<S0*0.80).mean()*100:.1f}%"))
+
+            # Recommendation
+            _q.put(("put", f"\n  {'='*60}"))
+            _q.put(("put", f"  RECOMMENDATION"))
+            _q.put(("put", f"  {'='*60}"))
+            prob_up = (finals > S0).mean() * 100
+            if prob_up > 60 and med_sharpe > 0.3 and median_dd > -15:
+                _q.put(("put", f"  BULLISH — {prob_up:.0f}% upside probability, positive Sharpe"))
+                _q.put(("put", f"  Median target: ${np.median(finals):.2f} ({(np.median(finals)-S0)/S0*100:+.1f}%)"))
+            elif prob_up < 40 or median_dd < -20:
+                _q.put(("put", f"  BEARISH — only {prob_up:.0f}% upside, drawdown risk {median_dd:.0f}%"))
+                _q.put(("put", f"  Consider hedging or reducing exposure"))
+            else:
+                _q.put(("put", f"  NEUTRAL — {prob_up:.0f}% upside, moderate risk"))
+                _q.put(("put", f"  Median target: ${np.median(finals):.2f} ({(np.median(finals)-S0)/S0*100:+.1f}%)"))
+
+            _q.put(("status", f"MC: {t} median ${np.median(finals):.2f} ({h}d, {n:,} sims)"))
+        bg_run(out, app.status, f"Monte Carlo: {t} ({int(sims_e.get()):,} sims)", work)
 
     Btn(row, text="Simulate", color=C["amber"], width=100, command=_run).pack(side="left", padx=6)
-    ctk.CTkLabel(card, text="  Ticker | Simulations | Horizon (days)",
+    ctk.CTkLabel(card, text="  Ticker | Simulations | Horizon (days)  •  Uses 2yr drift + 30d vol (recommended)",
                   font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0,10))
     return f
 
