@@ -10644,7 +10644,7 @@ class FinalAIQuantum:
         console.print("[bold cyan]🎲 Monte Carlo Price Simulation[/bold cyan]\n")
 
         ticker   = Prompt.ask("Ticker symbol").upper().strip()
-        n_sims   = IntPrompt.ask("Number of simulations", default=1000)
+        n_sims   = IntPrompt.ask("Number of simulations", default=1000000)
         horizon  = IntPrompt.ask("Forecast horizon (trading days)", default=63)
         conf_pct = FloatPrompt.ask("VaR confidence level (e.g. 95)", default=95.0)
 
