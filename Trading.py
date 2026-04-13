@@ -107,6 +107,25 @@ logger = logging.getLogger(__name__)
 # JSON EXTRACTION UTILITY
 # ==========================================
 
+def sanitize_for_prompt(text: str, max_len: int = 200) -> str:
+    """Sanitize external text (news, user input) before AI prompt interpolation.
+
+    Prevents prompt injection by:
+    - Removing newlines and control chars
+    - Capping length
+    - Stripping instruction-like patterns
+    """
+    if not text: return ""
+    s = str(text).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    # Strip common injection patterns
+    for pat in ['ignore all', 'ignore previous', 'disregard', 'system:', 'user:',
+                'assistant:', '[INST]', '</s>', '<|', '|>']:
+        s = s.replace(pat, '').replace(pat.upper(), '').replace(pat.capitalize(), '')
+    # Collapse whitespace and cap length
+    s = ' '.join(s.split())[:max_len]
+    return s
+
+
 def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
     Extract JSON object from text by finding balanced braces.
@@ -119,26 +138,48 @@ def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     if start_idx == -1:
         return None
     
-    # Find matching closing brace by counting braces
+    # Find matching closing brace — tracks string/escape state to avoid
+    # counting braces that appear inside quoted strings.
     brace_count = 0
     end_idx = -1
-    
+    in_string = False
+    escape_next = False
+
     for i in range(start_idx, len(text)):
-        if text[i] == '{':
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
             brace_count += 1
-        elif text[i] == '}':
+        elif ch == '}':
             brace_count -= 1
             if brace_count == 0:
                 end_idx = i
                 break
-    
+
     if end_idx == -1:
         return None
-    
+
     json_str = text[start_idx:end_idx+1]
-    
+
     try:
-        return json.loads(json_str)
+        result = json.loads(json_str)
+        # Validate critical fields for trade JSON — reject if incomplete
+        if isinstance(result, dict) and 'action' in result:
+            if result.get('action') in ('BUY', 'SELL'):
+                # Require SL and confidence if it's a trade signal
+                if 'confidence' not in result and 'stop_loss_price' not in result:
+                    logger.warning("Incomplete trade JSON — missing confidence/SL")
+        return result
     except json.JSONDecodeError as e:
         logger.debug(f"JSON parse error: {e}")
         return None
@@ -1020,9 +1061,13 @@ class NotificationManager:
                 kwargs = {"json": {"chat_id": chat_id, "text": message[:4000], "parse_mode": "HTML"}, "timeout": 8}
                 if self.proxies:
                     kwargs["proxies"] = self.proxies
-                requests.post(url, **kwargs)
+                resp = requests.post(url, **kwargs)
+                if resp.status_code != 200:
+                    logger.warning(f"Telegram send failed: HTTP {resp.status_code} — {resp.text[:100]}")
+                    return False
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Telegram send error: {e}")
             return False
 
     def alert_signal(self, ticker: str, action: str, price: float, conf: float, sl: Optional[float] = None, tp: Optional[float] = None):
@@ -2842,20 +2887,24 @@ class DataManager:
                                 }
                                 await ws.send(_json.dumps(sub))
                             backoff = 1.0
-                            # Read loop
+                            # Read loop — track last subscribed set to avoid spam resubscribes
+                            import time as _wst
+                            _last_sub_time = 0.0
+                            _last_sub_syms = set(DataManager._crypto_ws_symbols) if DataManager._crypto_ws_symbols else set()
                             while not DataManager._crypto_ws_stop:
                                 try:
-                                    msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
                                 except asyncio.TimeoutError:
-                                    # If new symbols added, re-subscribe
-                                    if DataManager._crypto_ws_symbols:
-                                        sub = {
-                                            "type": "subscribe",
-                                            "channel": "ticker",
-                                            "product_ids": sorted(list(DataManager._crypto_ws_symbols))
-                                        }
+                                    # Only re-subscribe if symbols changed AND 30s since last sub
+                                    cur_syms = set(DataManager._crypto_ws_symbols) if DataManager._crypto_ws_symbols else set()
+                                    now = _wst.time()
+                                    if cur_syms != _last_sub_syms and (now - _last_sub_time) > 30:
+                                        sub = {"type": "subscribe", "channel": "ticker",
+                                               "product_ids": sorted(list(cur_syms))}
                                         try:
                                             await ws.send(_json.dumps(sub))
+                                            _last_sub_time = now
+                                            _last_sub_syms = cur_syms
                                         except Exception:
                                             pass
                                     continue
@@ -3263,12 +3312,25 @@ class NewsAnalyzer:
     
     @staticmethod
     def get_news(ticker: str, limit: int = 10) -> List[NewsItem]:
-        """Get news headlines from all sources for the last 7 days relevant to a ticker."""
+        """Get news headlines from all sources for the last 7 days relevant to a ticker.
+        Deduplicates headlines across APIs using normalized title matching."""
         news_items: List[NewsItem] = []
+        _seen_titles = set()
+
+        def _add(item):
+            """Add a news item only if its title hasn't been seen (dedup across APIs)."""
+            try:
+                key = ''.join(str(item.title).lower().split())[:80]
+                if key and key not in _seen_titles:
+                    _seen_titles.add(key)
+                    news_items.append(item)
+            except Exception:
+                pass
+
         try:
             import requests
             from datetime import timezone
-            
+
             logger.info(f"📰 Fetching {ticker} headlines from all sources (last 7 days)...")
             
             ticker_lower = ticker.lower()
@@ -3387,7 +3449,7 @@ class NewsAnalyzer:
                                 sentiment = calculate_sentiment(title)
                                 published_str = published_dt.strftime("%Y-%m-%d %H:%M UTC") if published_dt else "Recent"
                                 
-                                news_items.append(NewsItem(
+                                _add(NewsItem(
                                     title=title,
                                     source=item.get('publisher', {}).get('name', 'Polygon') if isinstance(item.get('publisher'), dict) else 'Polygon',
                                     published=published_str,
@@ -3428,7 +3490,7 @@ class NewsAnalyzer:
                                 sentiment = calculate_sentiment(title)
                                 published_str = published_dt.strftime("%Y-%m-%d %H:%M UTC") if published_dt else "Recent"
                                 
-                                news_items.append(NewsItem(
+                                _add(NewsItem(
                                     title=title,
                                     source=item.get('source', 'Finnhub'),
                                     published=published_str,
@@ -3470,7 +3532,7 @@ class NewsAnalyzer:
                                 sentiment = item.get('overall_sentiment_label', 'NEUTRAL')
                                 published_str = published_dt.strftime("%Y-%m-%d %H:%M UTC") if published_dt else "Recent"
                                 
-                                news_items.append(NewsItem(
+                                _add(NewsItem(
                                     title=title,
                                     source=item.get('source', 'AlphaVantage'),
                                     published=published_str,
@@ -3517,7 +3579,7 @@ class NewsAnalyzer:
                                 url_str = item.get('link', f"https://finance.yahoo.com/quote/{ticker}")
                                 sentiment = calculate_sentiment(title)
                                 published_str = published_dt.strftime("%Y-%m-%d %H:%M UTC") if published_dt else "Recent"
-                                news_items.append(NewsItem(
+                                _add(NewsItem(
                                     title=title,
                                     source=item.get('source_id', 'NewsData'),
                                     published=published_str,
@@ -3584,7 +3646,7 @@ class NewsAnalyzer:
                         
                         sentiment = calculate_sentiment(title)
                         
-                        news_items.append(NewsItem(
+                        _add(NewsItem(
                             title=title,
                             source="Yahoo Finance",
                             published="Recent",
@@ -4473,19 +4535,36 @@ class PredictionTracker:
     
     @staticmethod
     def get_pending_predictions() -> List[Dict]:
-        """Get all predictions that haven't been checked yet."""
+        """Get all predictions that haven't been checked yet.
+        Auto-prunes predictions older than 30 days with no outcome."""
         import json
         from datetime import datetime, timedelta
-        
+
         try:
             if not os.path.exists(PredictionTracker.DB_FILE):
                 return []
-            
+
             with open(PredictionTracker.DB_FILE, 'r') as f:
                 predictions = json.load(f)
-            
-            # Return predictions without outcomes yet
-            pending = [p for p in predictions if p.get('outcome') is None]
+
+            # Prune stale predictions (>30 days old, no outcome) to prevent unbounded growth
+            cutoff = datetime.now() - timedelta(days=30)
+            cleaned = []
+            for p in predictions:
+                try:
+                    pred_time = datetime.fromisoformat(p.get('timestamp', ''))
+                    if p.get('outcome') is None and pred_time < cutoff:
+                        continue  # skip stale
+                except Exception:
+                    pass
+                cleaned.append(p)
+            if len(cleaned) != len(predictions):
+                try:
+                    with open(PredictionTracker.DB_FILE, 'w') as f:
+                        json.dump(cleaned, f, indent=2)
+                except Exception: pass
+
+            pending = [p for p in cleaned if p.get('outcome') is None]
             return pending
         except Exception as e:
             logger.error(f"Failed to load predictions: {e}")
@@ -4517,15 +4596,24 @@ class PredictionTracker:
                     
                     price_change = actual_price - pred_price
                     
+                    # Direction correctness is primary (70 pts); target achievement adds bonus (up to 30).
+                    # A correct direction prediction always scores >= 70, even if target wasn't fully reached.
                     if pred_direction == "UP" and price_change > 0:
                         direction_correct = True
-                        accuracy_score = min(100, (price_change / (target_price - pred_price)) * 100) if target_price > pred_price else 50
+                        target_move = abs(target_price - pred_price) if target_price != pred_price else 1
+                        achievement = min(1.0, price_change / target_move) if target_move > 0 else 0
+                        accuracy_score = 70 + achievement * 30  # 70-100
                     elif pred_direction == "DOWN" and price_change < 0:
                         direction_correct = True
-                        accuracy_score = min(100, (abs(price_change) / (pred_price - target_price)) * 100) if pred_price > target_price else 50
+                        target_move = abs(pred_price - target_price) if target_price != pred_price else 1
+                        achievement = min(1.0, abs(price_change) / target_move) if target_move > 0 else 0
+                        accuracy_score = 70 + achievement * 30
                     elif pred_direction == "SIDEWAYS" and abs(price_change) < (abs(target_price - pred_price) * 0.1):
                         direction_correct = True
                         accuracy_score = 80
+                    else:
+                        # Wrong direction: score 0-30 based on magnitude
+                        accuracy_score = max(0, 30 - abs(price_change / pred_price * 100) * 3) if pred_price else 0
                     
                     profit_pct = (price_change / pred_price * 100) if pred_price != 0 else 0
                     
@@ -6148,7 +6236,7 @@ class ThemeResearcher:
                         if news_items:
                             news_block += f"\n{ticker} News:\n"
                             for ni in news_items:
-                                news_block += f"  - {ni.title} [{ni.source}, {ni.published}] (sentiment: {ni.sentiment})\n"
+                                news_block += f"  - {sanitize_for_prompt(ni.title)} [{sanitize_for_prompt(ni.source, 30)}, {ni.published}] (sentiment: {ni.sentiment})\n"
                     except Exception:
                         pass
 
@@ -6642,7 +6730,7 @@ class TechnicalAnalyzer:
 
             senkou_a = float((((tenkan_sen + kijun_sen)/2)).__float__()) if True else float(((nine_period_high + nine_period_low)/2).iloc[-1])
             senkou_b = float((((high.rolling(min(52, len(high))).max() + low.rolling(min(52, len(low))).min())/2).iloc[-1]))
-            chikou_span = float(close.shift(-26).iloc[-27]) if len(close) > 26 else float(close.iloc[-1])
+            chikou_span = float(close.iloc[-27]) if len(close) > 26 else float(close.iloc[-1])
 
             # HMA 20 (Hull Moving Average) - proper WMA calculation
             def wma(series, period):
@@ -7130,7 +7218,7 @@ class AIAnalyzer:
                         total_w += w
                         sentiment_str = getattr(ni, 'sentiment', 'NEUTRAL')
                         
-                        item_str = f"- {ni.title} [source: {ni.source}, relevance: {w:.1f}] (score: {s:.2f})"
+                        item_str = f"- {sanitize_for_prompt(ni.title)} [source: {sanitize_for_prompt(ni.source, 30)}, relevance: {w:.1f}] (score: {s:.2f})"
                         
                         if 'BULLISH' in sentiment_str.upper():
                             bullish.append(item_str)
@@ -7601,8 +7689,10 @@ class AIAnalyzer:
         except Exception:
             comprehensive_confidence = ai_confidence
 
-        # Blend: 40% AI / 60% quantitative (quant is deterministic and more reliable)
-        final_confidence = (ai_confidence * 0.4) + (comprehensive_confidence * 0.6)
+        # Blend: 40% AI / 60% quantitative. If quant is near-zero (no clear edge),
+        # treat it as neutral (50) rather than letting AI dominate a flat signal.
+        _quant_adj = comprehensive_confidence if comprehensive_confidence >= 20 else 50
+        final_confidence = (ai_confidence * 0.4) + (_quant_adj * 0.6)
         final_confidence = min(95.0, max(0.0, final_confidence))
 
         return TradeSummary(
@@ -9155,7 +9245,8 @@ class SignalCalibrator:
 
     @staticmethod
     def _classify(sig_text: str) -> str:
-        s = sig_text.lower()
+        if not sig_text: return 'other'
+        s = str(sig_text).lower()
         if 'divergence' in s or 'div' in s: return 'divergence'
         if 'confluence' in s: return 'confluence'
         if 'pattern' in s or 'double' in s or 'head' in s: return 'pattern'
@@ -9299,7 +9390,7 @@ class WalkForwardOptimizer:
         win_rate = wins / total_trades * 100 if total_trades > 0 else 0
         avg_pnl = np.mean([t['pnl'] for t in trades])
         pnl_std = np.std([t['pnl'] for t in trades])
-        sharpe = (avg_pnl / pnl_std * np.sqrt(252 / step_days)) if pnl_std > 0 else 0
+        sharpe = (avg_pnl / pnl_std * np.sqrt(252 / max(1, step_days))) if pnl_std > 0 else 0
 
         result = {
             'ticker': ticker, 'date': datetime.now().isoformat(),
@@ -10218,13 +10309,18 @@ class AutoTrader:
         self._maybe_reset_day()
 
     def _save_state(self):
+        """Atomic write: write to .tmp then os.replace (atomic rename).
+        Prevents corruption if multiple threads write simultaneously."""
         try:
             Path('logs').mkdir(exist_ok=True)
-            Path('logs/auto_trader_state.json').write_text(json.dumps({
+            final = Path('logs/auto_trader_state.json')
+            tmp = Path('logs/auto_trader_state.json.tmp')
+            tmp.write_text(json.dumps({
                 'daily_trades': self.daily_trades, 'daily_pnl_pct': self.daily_pnl_pct,
                 'last_reset_date': self.last_reset_date, 'open_positions': self.open_positions,
                 'enabled': self.enabled, 'mode': self.mode,
             }, indent=2))
+            os.replace(str(tmp), str(final))  # Atomic on POSIX and Windows
         except Exception: pass
 
     def _maybe_reset_day(self):
@@ -10394,10 +10490,14 @@ class AutoTrader:
         final_qty = min(risk_qty, notional_qty, exposure_qty, bp_qty)
         if is_crypto:
             position_size = round(max(final_qty, 0.0), 6)
-            if position_size * entry_f < 10: return None
+            if position_size * entry_f < 10:
+                console.print(f"[yellow]AutoTrader skipped ({ticker}): crypto notional ${position_size*entry_f:.2f} below $10 min[/yellow]")
+                return None
         else:
             position_size = max(0, int(final_qty))
-            if position_size < 1: return None
+            if position_size < 1:
+                console.print(f"[yellow]AutoTrader skipped ({ticker}): position size < 1 share (risk too wide or account too small)[/yellow]")
+                return None
 
         broker_order_id = None
         channel = "PAPER"
@@ -12083,10 +12183,22 @@ class FinalAIQuantum:
         n          = len(valid_tickers)
 
         console.print(f"\n[dim]Simulating {n_portfolios:,} random portfolios...[/dim]")
+        # Regularize covariance matrix — prevents singular/near-singular matrices
+        # from highly correlated assets producing NaN volatilities
+        cov_vals = cov_mat.values
+        try:
+            min_eig = np.linalg.eigvalsh(cov_vals).min()
+            if min_eig < 1e-8:
+                cov_vals = cov_vals + np.eye(n) * max(1e-6, abs(min_eig) + 1e-8)
+                console.print("[dim]  (regularized near-singular covariance matrix)[/dim]")
+        except Exception:
+            cov_vals = cov_vals + np.eye(n) * 1e-6
         rng = np.random.default_rng()
         w_all  = rng.dirichlet(np.ones(n), size=n_portfolios)
         ret_all = w_all @ mean_rets.values
-        vol_all = np.sqrt(np.einsum('ij,jk,ik->i', w_all, cov_mat.values, w_all))
+        vol_all = np.sqrt(np.einsum('ij,jk,ik->i', w_all, cov_vals, w_all))
+        # Guard against any remaining NaN
+        vol_all = np.where(np.isfinite(vol_all) & (vol_all > 0), vol_all, 1e-6)
         sr_all  = (ret_all - rf_rate) / vol_all
 
         max_sr_idx = int(np.argmax(sr_all))
