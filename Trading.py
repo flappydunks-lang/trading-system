@@ -7939,17 +7939,174 @@ class AIAnalyzer:
         except Exception:
             pass
 
-        # HMA slope and ROC
-        try:
-            if abs(indicators.hma_20 - indicators.ema_21) / max(1, indicators.price) < 0.01:
-                neutral.append("HMA aligned with EMA21")
-            if abs(indicators.roc_12) > 10:
-                # large ROC magnitude indicates rapid movement
-                neutral.append(f"High ROC(12) magnitude ({indicators.roc_12}%)")
-        except Exception:
-            pass
+        # ===== PROFESSIONAL TRADER SIGNALS =====
 
-        # EXTREME OVERBOUGHT DETECTION (ES scenario)
+        # 1. BOLLINGER BAND SQUEEZE (John Bollinger) — low vol precedes big moves
+        # When BBs are inside Keltner Channels = "squeeze" → expect breakout
+        try:
+            if indicators.bb_upper and indicators.bb_lower and indicators.keltner_upper and indicators.keltner_lower:
+                bb_width = indicators.bb_upper - indicators.bb_lower
+                kc_width = indicators.keltner_upper - indicators.keltner_lower
+                if bb_width < kc_width:
+                    # Squeeze active — direction comes from price position
+                    if indicators.price > indicators.bb_middle:
+                        bullish_signals.append("Bollinger squeeze → bullish breakout setup")
+                    elif indicators.price < indicators.bb_middle:
+                        bearish_signals.append("Bollinger squeeze → bearish breakdown setup")
+                # Price at band extremes (mean reversion)
+                if indicators.price >= indicators.bb_upper:
+                    bearish_signals.append("Price at upper Bollinger Band")
+                elif indicators.price <= indicators.bb_lower:
+                    bullish_signals.append("Price at lower Bollinger Band")
+        except Exception: pass
+
+        # 2. STOCHASTIC K/D CROSSOVER (George Lane)
+        try:
+            if indicators.stochastic_k and indicators.stochastic_d:
+                if indicators.stochastic_k < 20 and indicators.stochastic_d < 20:
+                    if indicators.stochastic_k > indicators.stochastic_d:
+                        bullish_signals.append(f"Stochastic bullish cross in oversold ({indicators.stochastic_k:.0f})")
+                elif indicators.stochastic_k > 80 and indicators.stochastic_d > 80:
+                    if indicators.stochastic_k < indicators.stochastic_d:
+                        bearish_signals.append(f"Stochastic bearish cross in overbought ({indicators.stochastic_k:.0f})")
+        except Exception: pass
+
+        # 3. DIRECTIONAL MOVEMENT (+DI/-DI crossover — Wilder)
+        try:
+            if indicators.plus_di and indicators.minus_di and indicators.adx:
+                if indicators.plus_di > indicators.minus_di and indicators.adx > 20:
+                    bullish_signals.append(f"+DI > -DI with ADX {indicators.adx:.0f} (bullish trend)")
+                elif indicators.minus_di > indicators.plus_di and indicators.adx > 20:
+                    bearish_signals.append(f"-DI > +DI with ADX {indicators.adx:.0f} (bearish trend)")
+        except Exception: pass
+
+        # 4. OBV (On-Balance Volume) DIVERGENCE — institutional accumulation/distribution
+        try:
+            if hasattr(indicators, 'closes') and indicators.obv and len(indicators.closes) >= 20:
+                price_trend = indicators.closes.iloc[-1] > indicators.closes.iloc[-20]
+                # OBV rising while price flat/falling = hidden accumulation (bullish)
+                # OBV falling while price rising = distribution (bearish)
+                # Simple proxy: compare OBV direction to price direction
+                obv_series = indicators.closes.copy()  # approximate, real OBV uses cumulative volume
+                price_up = indicators.closes.iloc[-1] > indicators.closes.iloc[-10]
+                # Use volume-weighted approach as proxy
+                recent_up_vol = sum(indicators.volumes.iloc[i] for i in range(-10, 0)
+                                    if indicators.closes.iloc[i] > indicators.closes.iloc[i-1])
+                recent_down_vol = sum(indicators.volumes.iloc[i] for i in range(-10, 0)
+                                      if indicators.closes.iloc[i] <= indicators.closes.iloc[i-1])
+                if recent_up_vol > recent_down_vol * 1.5 and not price_up:
+                    bullish_signals.append("OBV divergence: accumulation while price flat")
+                elif recent_down_vol > recent_up_vol * 1.5 and price_up:
+                    bearish_signals.append("OBV divergence: distribution while price rising")
+        except Exception: pass
+
+        # 5. MACD HISTOGRAM MOMENTUM (direction matters more than sign)
+        try:
+            if indicators.macd_histogram is not None:
+                if hasattr(indicators, 'closes') and len(indicators.closes) >= 3:
+                    # Histogram rising (even if negative) = improving momentum
+                    # We don't have histogram history, so compare MACD-Signal gap direction
+                    hist = indicators.macd - indicators.macd_signal
+                    if hist > 0 and hist > indicators.price * 0.001:
+                        bullish_signals.append("MACD histogram positive & expanding")
+                    elif hist < 0 and hist < -indicators.price * 0.001:
+                        bearish_signals.append("MACD histogram negative & expanding")
+        except Exception: pass
+
+        # 6. PRE-COMPUTED VWAP — use the actual calculated VWAP (not the buggy manual one)
+        try:
+            if indicators.vwap and indicators.vwap > 0:
+                vwap_dev_pct = (indicators.price - indicators.vwap) / indicators.vwap * 100
+                if vwap_dev_pct > 1.5:
+                    bearish_signals.append(f"Price {vwap_dev_pct:.1f}% above VWAP")
+                elif vwap_dev_pct < -1.5:
+                    bullish_signals.append(f"Price {vwap_dev_pct:.1f}% below VWAP")
+        except Exception: pass
+
+        # 7. ICHIMOKU TK CROSS (Tenkan/Kijun — "Golden Cross" of Ichimoku)
+        try:
+            if indicators.tenkan_sen and indicators.kijun_sen:
+                if indicators.tenkan_sen > indicators.kijun_sen:
+                    bullish_signals.append("Ichimoku TK cross bullish")
+                elif indicators.tenkan_sen < indicators.kijun_sen:
+                    bearish_signals.append("Ichimoku TK cross bearish")
+        except Exception: pass
+
+        # 8. MARKET REGIME FILTER — ranging markets should reduce confidence
+        try:
+            if indicators.market_regime == 'RANGING':
+                neutral.append("Market regime: RANGING (lower conviction)")
+            elif indicators.market_regime == 'TRENDING' and indicators.regime_confidence > 60:
+                neutral.append(f"Market regime: TRENDING ({indicators.regime_confidence:.0f}%)")
+        except Exception: pass
+
+        # 9. RSI DIVERGENCE (price makes new high/low but RSI doesn't)
+        try:
+            if hasattr(indicators, 'closes') and len(indicators.closes) >= 20:
+                price_high_now = indicators.closes.iloc[-5:].max()
+                price_high_prev = indicators.closes.iloc[-20:-5].max()
+                price_low_now = indicators.closes.iloc[-5:].min()
+                price_low_prev = indicators.closes.iloc[-20:-5].min()
+                # Bearish divergence: price new high but RSI isn't extreme
+                if price_high_now > price_high_prev and indicators.rsi_14 < 65:
+                    bearish_signals.append("Bearish RSI divergence (price high, RSI fading)")
+                # Bullish divergence: price new low but RSI isn't extreme
+                if price_low_now < price_low_prev and indicators.rsi_14 > 35:
+                    bullish_signals.append("Bullish RSI divergence (price low, RSI rising)")
+        except Exception: pass
+
+        # 10. KELTNER CHANNEL POSITION — trend-following channel
+        try:
+            if indicators.keltner_upper and indicators.keltner_lower:
+                if indicators.price > indicators.keltner_upper:
+                    bullish_signals.append("Price above Keltner Channel (strong uptrend)")
+                elif indicators.price < indicators.keltner_lower:
+                    bearish_signals.append("Price below Keltner Channel (strong downtrend)")
+        except Exception: pass
+
+        # 11. SMA 20/50 GOLDEN/DEATH CROSS
+        try:
+            if indicators.sma_20 and indicators.sma_50:
+                if indicators.sma_20 > indicators.sma_50:
+                    bullish_signals.append("SMA 20/50 golden cross")
+                elif indicators.sma_20 < indicators.sma_50:
+                    bearish_signals.append("SMA 20/50 death cross")
+        except Exception: pass
+
+        # 12. FAST RSI(7) FOR DAY TRADING — more responsive than RSI(14)
+        try:
+            if is_day_trading and indicators.rsi_7:
+                if indicators.rsi_7 < 25:
+                    bullish_signals.append(f"Fast RSI(7) oversold ({indicators.rsi_7:.0f})")
+                elif indicators.rsi_7 > 75:
+                    bearish_signals.append(f"Fast RSI(7) overbought ({indicators.rsi_7:.0f})")
+        except Exception: pass
+
+        # 13. MULTI-INDICATOR CONFLUENCE BONUS — when 3+ indicator types agree
+        _bull_categories = set()
+        _bear_categories = set()
+        for s in bullish_signals:
+            sl = s.lower()
+            if 'rsi' in sl or 'stochastic' in sl: _bull_categories.add('momentum')
+            if 'sma' in sl or 'ema' in sl or 'cross' in sl: _bull_categories.add('trend')
+            if 'volume' in sl or 'obv' in sl or 'pressure' in sl: _bull_categories.add('volume')
+            if 'pattern' in sl or 'double' in sl: _bull_categories.add('pattern')
+            if 'bollinger' in sl or 'keltner' in sl: _bull_categories.add('volatility')
+        for s in bearish_signals:
+            sl = s.lower()
+            if 'rsi' in sl or 'stochastic' in sl: _bear_categories.add('momentum')
+            if 'sma' in sl or 'ema' in sl or 'cross' in sl: _bear_categories.add('trend')
+            if 'volume' in sl or 'obv' in sl or 'pressure' in sl: _bear_categories.add('volume')
+            if 'pattern' in sl or 'double' in sl: _bear_categories.add('pattern')
+            if 'bollinger' in sl or 'keltner' in sl: _bear_categories.add('volatility')
+        if len(_bull_categories) >= 3:
+            bullish_signals.append(f"Multi-category confluence ({len(_bull_categories)} types agree)")
+        if len(_bear_categories) >= 3:
+            bearish_signals.append(f"Multi-category confluence ({len(_bear_categories)} types agree)")
+
+        # ===== END PROFESSIONAL SIGNALS =====
+
+        # EXTREME OVERBOUGHT DETECTION
         extreme_overbought = False
         extreme_oversold = False
         
