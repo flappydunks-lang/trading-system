@@ -1,10 +1,6 @@
-"""FinalAI Quantum — Full Desktop Trading Application
+"""FinalAI Quantum — Professional Desktop Trading Application"""
 
-All 24 features from Trading.py in a professional dark-themed GUI.
-Launch: python gui/app.py  (or double-click Desktop shortcut)
-"""
-
-import os, sys, threading, json, queue, time as _time
+import os, sys, threading, json, queue
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -25,17 +21,28 @@ except Exception:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# Colors
-BG_DARK = "#0b0f19"
-BG_CARD = "#111827"
-BG_SIDEBAR = "#0f172a"
-ACCENT = "#3b82f6"
-ACCENT_GREEN = "#10b981"
-ACCENT_RED = "#ef4444"
-ACCENT_PURPLE = "#8b5cf6"
-ACCENT_AMBER = "#f59e0b"
-TEXT_DIM = "#64748b"
-TEXT_LIGHT = "#e2e8f0"
+# ── Design System ──
+C = {
+    "bg":       "#090d1a",
+    "surface":  "#0f1629",
+    "card":     "#141b2d",
+    "sidebar":  "#0c1222",
+    "border":   "#1e293b",
+    "accent":   "#3b82f6",
+    "green":    "#10b981",
+    "red":      "#ef4444",
+    "purple":   "#8b5cf6",
+    "amber":    "#f59e0b",
+    "cyan":     "#06b6d4",
+    "text":     "#f1f5f9",
+    "text2":    "#94a3b8",
+    "text3":    "#475569",
+    "hover":    "#1a2744",
+    "active":   "#172554",
+    "input":    "#1e293b",
+}
+FONT = "Segoe UI"
+MONO = "Cascadia Code"
 
 _trading_mod = None
 def T():
@@ -45,811 +52,762 @@ def T():
         _trading_mod = importlib.import_module("Trading")
     return _trading_mod
 
-_output_q = queue.Queue()
+_q = queue.Queue()
+
+# ── Reusable Components ──
+
+class Card(ctk.CTkFrame):
+    def __init__(self, parent, title=None, **kw):
+        super().__init__(parent, fg_color=C["card"], corner_radius=12, border_width=1, border_color=C["border"], **kw)
+        if title:
+            ctk.CTkLabel(self, text=title, font=(FONT, 14, "bold"), text_color=C["text"],
+                          anchor="w").pack(anchor="w", padx=16, pady=(14, 6))
 
 
-# ═══════════════════════════════════════════════════════════
-# REUSABLE COMPONENTS
-# ═══════════════════════════════════════════════════════════
-
-class OutputPanel(ctk.CTkFrame):
+class Output(ctk.CTkFrame):
     def __init__(self, parent, **kw):
-        super().__init__(parent, fg_color=BG_DARK, corner_radius=8, **kw)
-        self.textbox = ctk.CTkTextbox(self, font=("Consolas", 12), wrap="word",
-                                       state="disabled", fg_color=BG_DARK,
-                                       text_color=TEXT_LIGHT, corner_radius=8)
-        self.textbox.pack(fill="both", expand=True, padx=4, pady=4)
+        super().__init__(parent, fg_color=C["surface"], corner_radius=10, **kw)
+        self.tb = ctk.CTkTextbox(self, font=(MONO, 12), wrap="word", state="disabled",
+                                  fg_color=C["surface"], text_color=C["text2"],
+                                  corner_radius=10, border_width=0)
+        self.tb.pack(fill="both", expand=True, padx=8, pady=8)
 
-    def append(self, text):
-        self.textbox.configure(state="normal")
-        self.textbox.insert("end", text + "\n")
-        self.textbox.see("end")
-        self.textbox.configure(state="disabled")
+    def put(self, text):
+        self.tb.configure(state="normal")
+        self.tb.insert("end", text + "\n")
+        self.tb.see("end")
+        self.tb.configure(state="disabled")
 
     def clear(self):
-        self.textbox.configure(state="normal")
-        self.textbox.delete("1.0", "end")
-        self.textbox.configure(state="disabled")
+        self.tb.configure(state="normal")
+        self.tb.delete("1.0", "end")
+        self.tb.configure(state="disabled")
 
 
-class InputRow(ctk.CTkFrame):
-    """Horizontal row with label + entry."""
-    def __init__(self, parent, label, default="", width=120, **kw):
-        super().__init__(parent, fg_color="transparent", **kw)
-        ctk.CTkLabel(self, text=label, font=("Segoe UI", 12), width=80, anchor="w").pack(side="left")
-        self.entry = ctk.CTkEntry(self, width=width, font=("Segoe UI", 12))
-        self.entry.insert(0, default)
-        self.entry.pack(side="left", padx=5)
+class Btn(ctk.CTkButton):
+    def __init__(self, parent, text, color=None, **kw):
+        color = color or C["accent"]
+        super().__init__(parent, text=text, font=(FONT, 12, "bold"), height=36,
+                          corner_radius=8, fg_color=color,
+                          hover_color=self._lighten(color), **kw)
 
-    def get(self): return self.entry.get().strip()
+    @staticmethod
+    def _lighten(hex_color):
+        r, g, b = int(hex_color[1:3],16), int(hex_color[3:5],16), int(hex_color[5:7],16)
+        return f"#{min(r+30,255):02x}{min(g+30,255):02x}{min(b+30,255):02x}"
 
 
-def run_bg(output_panel, status_bar, label, fn):
-    """Run fn() in background thread, routing output to panel."""
-    output_panel.clear()
-    output_panel.append(f"{label}...\n")
-    if status_bar:
-        status_bar.set(f"{label}...")
+class Entry(ctk.CTkEntry):
+    def __init__(self, parent, **kw):
+        kw.setdefault("font", (FONT, 13))
+        kw.setdefault("height", 36)
+        kw.setdefault("corner_radius", 8)
+        kw.setdefault("fg_color", C["input"])
+        kw.setdefault("border_color", C["border"])
+        kw.setdefault("border_width", 1)
+        super().__init__(parent, **kw)
+
+
+class MetricCard(ctk.CTkFrame):
+    def __init__(self, parent, label, value, color=None, **kw):
+        super().__init__(parent, fg_color=C["card"], corner_radius=10,
+                          border_width=1, border_color=C["border"], **kw)
+        ctk.CTkLabel(self, text=label, font=(FONT, 11), text_color=C["text3"]).pack(padx=14, pady=(10, 0), anchor="w")
+        ctk.CTkLabel(self, text=value, font=(FONT, 20, "bold"),
+                      text_color=color or C["text"]).pack(padx=14, pady=(2, 12), anchor="w")
+
+
+def bg_run(output, status, label, fn):
+    output.clear()
+    output.put(f"{label}...\n")
+    if status: status.set(label)
     def _w():
-        try:
-            fn()
+        try: fn()
         except Exception as e:
-            _output_q.put(("append", f"\nError: {e}"))
             import traceback
-            _output_q.put(("append", traceback.format_exc()))
+            _q.put(("put", f"\nError: {e}\n{traceback.format_exc()}"))
     threading.Thread(target=_w, daemon=True).start()
 
 
-def fetch_data(ticker, period="5d", interval="1m"):
+def get_data(ticker, period="5d", interval="1m"):
     import yfinance as yf
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     if hasattr(df.columns, 'levels'):
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
     return df
 
+def get_ind(ticker, period="5d", interval="1m"):
+    df = get_data(ticker, period, interval)
+    if df is None or df.empty: return None, None
+    ind = T().TechnicalAnalyzer.calculate_indicators(df)
+    if ind: ind.price = float(df['Close'].iloc[-1]); ind.close = ind.price
+    return df, ind
 
-def get_indicators(ticker, period="5d", interval="1m"):
-    mod = T()
-    df = fetch_data(ticker, period, interval)
-    if df is None or df.empty:
-        return None, None
-    indicators = mod.TechnicalAnalyzer.calculate_indicators(df)
-    if indicators:
-        indicators.price = float(df['Close'].iloc[-1])
-        indicators.close = float(df['Close'].iloc[-1])
-    return df, indicators
+def analyzer():
+    a = T().AIAnalyzer.__new__(T().AIAnalyzer); a.api_key = None; return a
 
 
-def get_analyzer():
-    mod = T()
-    a = mod.AIAnalyzer.__new__(mod.AIAnalyzer)
-    a.api_key = None
-    return a
+# ═══════════════════════════════════════════════════
+# PAGES
+# ═══════════════════════════════════════════════════
+
+def page_dashboard(parent, app):
+    f = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+
+    # Hero
+    hero = ctk.CTkFrame(f, fg_color=C["card"], corner_radius=14, border_width=1, border_color=C["border"])
+    hero.pack(fill="x", padx=6, pady=(6, 12))
+    ctk.CTkLabel(hero, text="Welcome to FinalAI Quantum", font=(FONT, 24, "bold"),
+                  text_color=C["accent"]).pack(padx=20, pady=(20, 4), anchor="w")
+    ctk.CTkLabel(hero, text="Ultra-advanced quantitative trading intelligence with 12 adaptive AI agents, "
+                 "76+ technical signals, IBKR integration, and real-time analysis.",
+                  font=(FONT, 13), text_color=C["text2"], wraplength=700).pack(padx=20, pady=(0, 16), anchor="w")
+
+    # Metrics row
+    row = ctk.CTkFrame(f, fg_color="transparent")
+    row.pack(fill="x", padx=6, pady=(0, 12))
+    broker = os.getenv("BROKER", "alpaca").upper()
+    fh = "Active" if os.getenv("FINNHUB_API_KEY") else "Missing"
+    groq = "Active" if os.getenv("GROQ_API_KEY") else "Missing"
+    for label, val, color in [("Broker", broker, C["accent"]), ("Finnhub", fh, C["green"] if fh=="Active" else C["red"]),
+                               ("Groq AI", groq, C["green"] if groq=="Active" else C["red"]),
+                               ("Signals", "76+", C["purple"])]:
+        m = MetricCard(row, label, val, color)
+        m.pack(side="left", fill="x", expand=True, padx=4)
+
+    # Quick actions
+    qa = Card(f, title="Quick Actions")
+    qa.pack(fill="x", padx=6, pady=(0, 12))
+    btns = ctk.CTkFrame(qa, fg_color="transparent")
+    btns.pack(fill="x", padx=16, pady=(0, 14))
+    for label, page, color in [("Analyze Ticker", "analyze", C["accent"]),
+                                ("Swarm AI", "swarm", C["purple"]),
+                                ("Blind Test", "backtest", C["green"]),
+                                ("Monte Carlo", "monte_carlo", C["amber"])]:
+        Btn(btns, text=label, color=color, width=140,
+            command=lambda p=page: app.show_page(p)).pack(side="left", padx=4, pady=4)
+
+    # Features
+    feat = Card(f, title="All Features")
+    feat.pack(fill="x", padx=6, pady=(0, 12))
+    features = [
+        "Analyze Ticker — 76+ balanced technical signals with SL/TP",
+        "Market Scanner — scan entire universes for high-confidence setups",
+        "Swarm Intelligence — 12 adaptive AI agents with performance weighting",
+        "Blind Prediction Test — bot predicts, you reveal the future",
+        "Monte Carlo — 1M simulation price projections",
+        "Multi-Timeframe — 1m / 15m / 1h / 1D signal alignment",
+        "Smart Money — order blocks, FVGs, liquidity zones",
+        "Options Chain — calls/puts with greeks and OI",
+        "Insider Trading — corporate insider buy/sell signals",
+        "Political Trades — congressional disclosure tracker",
+        "Portfolio — live IBKR positions and P&L",
+        "Position Sizing — risk-based calculator",
+    ]
+    for feat_text in features:
+        ctk.CTkLabel(feat, text=f"  {feat_text}", font=(FONT, 12),
+                      text_color=C["text2"], anchor="w").pack(anchor="w", padx=16, pady=1)
+    ctk.CTkLabel(feat, text="").pack(pady=4)  # spacer
+    return f
 
 
-# ═══════════════════════════════════════════════════════════
-# PAGE BUILDERS — each returns a frame with the full UI
-# ═══════════════════════════════════════════════════════════
-
-def build_analyze(parent, app):
+def page_analyze(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ticker_e.pack(side="left", padx=5)
+    card = Card(f, title="Technical Analysis")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0, 14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL")
+    ticker_e.pack(side="left", padx=(0, 8))
     style_v = StringVar(value="day")
-    ctk.CTkSegmentedButton(top, values=["day", "swing", "long"], variable=style_v,
-                            font=("Segoe UI", 11)).pack(side="left", padx=10)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    ctk.CTkSegmentedButton(row, values=["day", "swing", "long"], variable=style_v,
+                            font=(FONT, 11), height=36, corner_radius=8).pack(side="left", padx=(0, 8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         is_day = style_v.get() == "day"
-        per = "5d" if is_day else ("3mo" if style_v.get() == "swing" else "1y")
+        per = "5d" if is_day else ("3mo" if style_v.get()=="swing" else "1y")
         itv = "1m" if is_day else "1d"
         def work():
-            df, ind = get_indicators(t, per, itv)
-            if ind is None:
-                _output_q.put(("append", f"No data for {t}")); return
-            sig = get_analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=is_day)
-            if not sig:
-                _output_q.put(("append", "No signal")); return
+            df, ind = get_ind(t, per, itv)
+            if ind is None: _q.put(("put", f"No data for {t}")); return
+            sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=is_day)
+            if not sig: _q.put(("put", "No signal")); return
             p = ind.price
-            _output_q.put(("clear", None))
-            for l in [
-                f"{'='*50}", f"  {t} @ ${p:.2f}", f"  Signal: {sig.action} ({sig.confidence:.0f}%)",
-                f"  SL: ${sig.stop_loss:.2f}  |  TP1: ${sig.take_profit_1:.2f}  |  TP2: ${sig.take_profit_2:.2f}",
-                f"{'='*50}", "",
-                f"  RSI: {ind.rsi_14:.1f}  |  MACD: {ind.macd:.4f}  |  ADX: {ind.adx:.1f}" if ind.adx else "",
-                f"  SMA20: {ind.sma_20:.2f}  |  SMA50: {ind.sma_50:.2f}",
-                f"  EMA8: {ind.ema_8:.2f}  |  EMA21: {ind.ema_21:.2f}",
-                f"  ATR: {ind.atr:.4f} ({ind.atr_percent:.2f}%)" if ind.atr_percent else "",
-                f"  Vol Ratio: {ind.volume_ratio:.2f}x" if ind.volume_ratio else "",
-                f"  Regime: {ind.market_regime}" if ind.market_regime else "",
-                f"  R:R = 1:{abs(sig.take_profit_1-p)/max(0.01,abs(p-sig.stop_loss)):.1f}",
-            ]:
-                if l: _output_q.put(("append", l))
+            _q.put(("clear", None))
+            lines = [
+                f"  {t} @ ${p:.2f}",
+                f"  {'BUY' if sig.action=='BUY' else 'SELL' if sig.action=='SELL' else 'HOLD'} — {sig.confidence:.0f}% confidence\n",
+                f"  Stop Loss     ${sig.stop_loss:.2f}",
+                f"  Take Profit 1 ${sig.take_profit_1:.2f}",
+                f"  Take Profit 2 ${sig.take_profit_2:.2f}",
+                f"  R:R Ratio     1:{abs(sig.take_profit_1-p)/max(0.01,abs(p-sig.stop_loss)):.1f}\n",
+                f"  RSI {ind.rsi_14:.1f}  |  MACD {ind.macd:.4f}  |  ADX {ind.adx:.1f}" if ind.adx else "",
+                f"  SMA20 {ind.sma_20:.2f}  |  SMA50 {ind.sma_50:.2f}",
+                f"  EMA8 {ind.ema_8:.2f}  |  EMA21 {ind.ema_21:.2f}",
+                f"  ATR {ind.atr:.4f} ({ind.atr_percent:.2f}%)" if ind.atr_percent else "",
+                f"  Volume {ind.volume_ratio:.2f}x  |  Regime: {ind.market_regime}" if ind.market_regime else "",
+            ]
+            for l in lines:
+                if l: _q.put(("put", l))
             if hasattr(sig, 'supporting_signals') and sig.supporting_signals:
-                _output_q.put(("append", "\n  Signals:"))
-                for s in sig.supporting_signals[:12]: _output_q.put(("append", f"    {s}"))
-            _output_q.put(("status", f"{t}: {sig.action} ({sig.confidence:.0f}%)"))
-        run_bg(out, app.status, f"Analyzing {t}", work)
+                _q.put(("put", "\n  Supporting signals:"))
+                for s in sig.supporting_signals[:12]: _q.put(("put", f"    {s}"))
+            _q.put(("status", f"{t}: {sig.action} ({sig.confidence:.0f}%)"))
+        bg_run(out, app.status, f"Analyzing {t}", work)
 
-    ctk.CTkButton(top, text="Analyze", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=100, fg_color=ACCENT).pack(side="left", padx=5)
+    Btn(row, text="Analyze", color=C["accent"], width=100, command=_run).pack(side="left")
     ticker_e.bind("<Return>", lambda e: _run())
     return f
 
 
-def build_scanner(parent, app):
+def page_scanner(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
+    card = Card(f, title="Market Scanner")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0, 14))
     uni_v = StringVar(value="tech_leaders")
-    ctk.CTkLabel(top, text="Universe:", font=("Segoe UI", 13)).pack(side="left")
-    ctk.CTkOptionMenu(top, values=["tech_leaders", "sp500_top50", "crypto", "all"],
-                       variable=uni_v, font=("Segoe UI", 12), width=150).pack(side="left", padx=5)
-    min_conf = ctk.CTkEntry(top, width=60, font=("Segoe UI", 12))
-    min_conf.insert(0, "70")
-    ctk.CTkLabel(top, text="Min Conf%:", font=("Segoe UI", 12)).pack(side="left", padx=(10,3))
-    min_conf.pack(side="left")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    ctk.CTkOptionMenu(row, values=["tech_leaders","sp500_top50","crypto","all"],
+                       variable=uni_v, font=(FONT, 12), width=160, height=36).pack(side="left", padx=(0,8))
+    conf_e = Entry(row, width=60); conf_e.insert(0, "70")
+    ctk.CTkLabel(row, text="Min%", font=(FONT, 12), text_color=C["text2"]).pack(side="left", padx=(8,3))
+    conf_e.pack(side="left")
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
     def _run():
         def work():
             mod = T()
-            universes = getattr(mod, 'MARKET_UNIVERSES', {})
-            tickers = list(universes.get(uni_v.get(), universes.get('tech_leaders', ['AAPL','MSFT','GOOGL'])))
-            conf_thresh = float(min_conf.get() or 70)
-            _output_q.put(("append", f"Scanning {len(tickers)} tickers (min conf {conf_thresh}%)...\n"))
-            hits = []
+            tickers = list(getattr(mod, 'MARKET_UNIVERSES', {}).get(uni_v.get(), ['AAPL','MSFT','GOOGL','NVDA','AMZN']))
+            thresh = float(conf_e.get() or 70)
+            _q.put(("put", f"Scanning {len(tickers)} tickers...\n"))
+            hits = 0
             for t in tickers:
                 try:
-                    df, ind = get_indicators(t, "5d", "1m")
+                    _, ind = get_ind(t, "5d", "1m")
                     if ind is None: continue
-                    sig = get_analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=True)
-                    if sig and sig.action != 'HOLD' and sig.confidence >= conf_thresh:
-                        hits.append((t, sig.action, sig.confidence, ind.price))
-                        _output_q.put(("append", f"  {'BUY' if sig.action=='BUY' else 'SELL'} {t} @ ${ind.price:.2f} ({sig.confidence:.0f}%)"))
+                    sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=True)
+                    if sig and sig.action != 'HOLD' and sig.confidence >= thresh:
+                        hits += 1
+                        _q.put(("put", f"  {sig.action:>4} {t:<8} ${ind.price:>10.2f}  {sig.confidence:.0f}%"))
                 except Exception: continue
-            if not hits:
-                _output_q.put(("append", "\nNo signals above threshold."))
-            else:
-                _output_q.put(("append", f"\n{len(hits)} signal(s) found."))
-            _output_q.put(("status", f"Scanner: {len(hits)} hits from {len(tickers)} tickers"))
-        run_bg(out, app.status, f"Scanning {uni_v.get()}", work)
+            _q.put(("put", f"\n{hits} signal(s) from {len(tickers)} scanned"))
+            _q.put(("status", f"Scanner: {hits} hits"))
+        bg_run(out, app.status, "Scanning", work)
 
-    ctk.CTkButton(top, text="Scan", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=80, fg_color=ACCENT).pack(side="left", padx=10)
+    Btn(row, text="Scan", color=C["accent"], width=80, command=_run).pack(side="left", padx=8)
     return f
 
 
-def build_news(parent, app):
+def page_news(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    card = Card(f, title="News & Market Intel")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL")
+    ticker_e.pack(side="left", padx=(0,8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
     def _run():
         t = ticker_e.get().strip().upper() or "AAPL"
         def work():
             import requests
-            _output_q.put(("append", f"Fetching news for {t}...\n"))
-            # NewsData
-            nd = os.getenv('NEWSDATA_API_KEY', '')
-            if nd:
+            for name, env, url_fn in [
+                ("NewsData", "NEWSDATA_API_KEY", lambda k: f"https://newsdata.io/api/1/news?apikey={k}&q={t}&language=en&size=8"),
+                ("News API", "NEWS_API_KEY", lambda k: f"https://newsapi.org/v2/everything?q={t}&apiKey={k}&pageSize=8&sortBy=publishedAt"),
+            ]:
+                key = os.getenv(env, '')
+                if not key: continue
                 try:
-                    r = requests.get(f"https://newsdata.io/api/1/news?apikey={nd}&q={t}&language=en&size=5", timeout=8)
-                    if r.status_code == 200:
-                        for art in r.json().get('results', [])[:5]:
-                            _output_q.put(("append", f"  [{art.get('pubDate','')[:10]}] {art['title']}"))
-                except Exception: pass
-            # News API
-            na = os.getenv('NEWS_API_KEY', '')
-            if na:
-                try:
-                    r = requests.get(f"https://newsapi.org/v2/everything?q={t}&apiKey={na}&pageSize=5&sortBy=publishedAt", timeout=8)
-                    if r.status_code == 200:
-                        _output_q.put(("append", "\n  Latest headlines:"))
-                        for art in r.json().get('articles', [])[:5]:
-                            _output_q.put(("append", f"  [{art.get('publishedAt','')[:10]}] {art['title']}"))
-                except Exception: pass
-            if not nd and not na:
-                _output_q.put(("append", "No news API keys configured. Add NEWSDATA_API_KEY or NEWS_API_KEY in Settings."))
-        run_bg(out, app.status, f"News: {t}", work)
+                    r = requests.get(url_fn(key), timeout=8)
+                    if r.status_code != 200: continue
+                    data = r.json()
+                    articles = data.get('results') or data.get('articles') or []
+                    if articles:
+                        _q.put(("put", f"  {name}:"))
+                        for a in articles[:8]:
+                            title = a.get('title', '?')
+                            date = (a.get('pubDate') or a.get('publishedAt') or '')[:10]
+                            _q.put(("put", f"    [{date}] {title}"))
+                        _q.put(("put", ""))
+                except Exception: continue
+        bg_run(out, app.status, f"News: {t}", work)
 
-    ctk.CTkButton(top, text="Get News", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=100, fg_color=ACCENT).pack(side="left", padx=10)
+    Btn(row, text="Fetch News", color=C["accent"], width=110, command=_run).pack(side="left")
     return f
 
 
-def build_swarm(parent, app):
+def page_swarm(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
+    card = Card(f, title="Swarm Intelligence — 12 Adaptive AI Agents")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL")
+    ticker_e.pack(side="left", padx=(0,8))
     rounds_v = StringVar(value="3")
-    ctk.CTkLabel(top, text="Rounds:", font=("Segoe UI", 12)).pack(side="left", padx=(10,3))
-    ctk.CTkOptionMenu(top, values=["2","3","4"], variable=rounds_v, width=55).pack(side="left")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    ctk.CTkLabel(row, text="Rounds", font=(FONT, 12), text_color=C["text2"]).pack(side="left", padx=(8,3))
+    ctk.CTkOptionMenu(row, values=["2","3","4"], variable=rounds_v, width=55, height=36).pack(side="left")
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
-            mod = T()
-            df, ind = get_indicators(t)
-            if ind is None: _output_q.put(("append", "No data")); return
-            swarm = mod.SwarmIntelligence()
-            # Redirect swarm console output
+            _, ind = get_ind(t)
+            if ind is None: _q.put(("put", "No data")); return
+            swarm = T().SwarmIntelligence()
             result = swarm.analyze(t, ind, rounds=int(rounds_v.get()))
             a, c = result.get('action','HOLD'), result.get('confidence',0)
             bd = result.get('breakdown',{})
-            _output_q.put(("append", f"\n{'='*50}"))
-            _output_q.put(("append", f"  CONSENSUS: {a} ({c:.1f}%)"))
-            _output_q.put(("append", f"  BUY: {bd.get('buy',0):.0f}%  SELL: {bd.get('sell',0):.0f}%  HOLD: {bd.get('hold',0):.0f}%"))
-            _output_q.put(("append", f"{'='*50}"))
-            for r in result.get('reasons', [])[:5]:
-                _output_q.put(("append", f"  - {r}"))
-            _output_q.put(("append", "\n  Leaderboard:"))
+            _q.put(("put", f"\n  CONSENSUS: {a} — {c:.1f}% confidence"))
+            _q.put(("put", f"  BUY {bd.get('buy',0):.0f}%  |  SELL {bd.get('sell',0):.0f}%  |  HOLD {bd.get('hold',0):.0f}%\n"))
+            for r in result.get('reasons', [])[:5]: _q.put(("put", f"    {r}"))
+            _q.put(("put", "\n  Agent Rankings:"))
             for ag in sorted(swarm.agents, key=lambda x: x.accuracy, reverse=True):
-                _output_q.put(("append", f"    {ag.name}: {ag.accuracy*100:.0f}% ({ag.weight:.1f}x)"))
-            _output_q.put(("status", f"Swarm: {a} on {t} ({c:.0f}%)"))
-        run_bg(out, app.status, f"Swarm: {t} ({rounds_v.get()} rounds)", work)
+                bar = "*" * int(ag.accuracy * 20)
+                _q.put(("put", f"    {ag.name:<22} {ag.accuracy*100:>5.0f}%  {ag.weight:.1f}x  {bar}"))
+            _q.put(("status", f"Swarm: {a} on {t} ({c:.0f}%)"))
+        bg_run(out, app.status, f"Swarm: {t}", work)
 
-    ctk.CTkButton(top, text="Run Swarm", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=110, fg_color=ACCENT_PURPLE, hover_color="#7c3aed").pack(side="left", padx=10)
+    Btn(row, text="Run Swarm", color=C["purple"], width=110, command=_run).pack(side="left", padx=8)
     return f
 
 
-def build_backtest(parent, app):
+def page_backtest(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=80, placeholder_text="AAPL", font=("Segoe UI", 13))
-    start_e = ctk.CTkEntry(top, width=100, font=("Segoe UI", 12))
-    start_e.insert(0, (datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d'))
-    cutoff_e = ctk.CTkEntry(top, width=100, font=("Segoe UI", 12))
-    cutoff_e.insert(0, (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d'))
+    card = Card(f, title="Blind Prediction Test")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=80, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,6))
+    start_e = Entry(row, width=100); start_e.insert(0, (datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d')); start_e.pack(side="left", padx=3)
+    cutoff_e = Entry(row, width=100); cutoff_e.insert(0, (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')); cutoff_e.pack(side="left", padx=3)
     horizon_v = StringVar(value="5")
-    for lbl, w in [("Ticker:",ticker_e),("Start:",start_e),("Cutoff:",cutoff_e)]:
-        ctk.CTkLabel(top, text=lbl, font=("Segoe UI", 12)).pack(side="left", padx=(8,2))
-        w.pack(side="left")
-    ctk.CTkLabel(top, text="Days:", font=("Segoe UI", 12)).pack(side="left", padx=(8,2))
-    ctk.CTkOptionMenu(top, values=["3","5","10","20"], variable=horizon_v, width=55).pack(side="left")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    ctk.CTkOptionMenu(row, values=["3","5","10","20"], variable=horizon_v, width=55, height=36).pack(side="left", padx=3)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
             import yfinance as yf
-            df = fetch_data(t, period=None, interval="1d") if False else None
             df = yf.download(t, start=start_e.get(), end=cutoff_e.get(), interval='1d', progress=False)
-            if hasattr(df.columns, 'levels'):
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            if df is None or len(df) < 20:
-                _output_q.put(("append", "Not enough data")); return
+            if hasattr(df.columns, 'levels'): df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            if df is None or len(df) < 20: _q.put(("put", "Not enough data")); return
             p = float(df['Close'].iloc[-1])
             ind = T().TechnicalAnalyzer.calculate_indicators(df)
-            if not ind: _output_q.put(("append", "Indicator error")); return
+            if not ind: _q.put(("put", "Indicator error")); return
             ind.price = p; ind.close = p
-            sig = get_analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5)
-            if not sig: _output_q.put(("append", "No signal")); return
-            _output_q.put(("append", f"Bot sees {len(df)} candles ending ${p:.2f}"))
-            _output_q.put(("append", f"\nPREDICTION: {sig.action} ({sig.confidence:.0f}%)"))
-            _output_q.put(("append", f"SL: ${sig.stop_loss:.2f} | TP: ${sig.take_profit_1:.2f}\n"))
-            # Reveal
+            sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5)
+            if not sig: _q.put(("put", "No signal")); return
+            _q.put(("put", f"  Bot sees {len(df)} candles ending ${p:.2f}\n"))
+            _q.put(("put", f"  PREDICTION: {sig.action} ({sig.confidence:.0f}%)"))
+            _q.put(("put", f"  SL ${sig.stop_loss:.2f}  |  TP ${sig.take_profit_1:.2f}\n"))
             h = int(horizon_v.get())
             end = (datetime.strptime(cutoff_e.get(), '%Y-%m-%d')+timedelta(days=h+5)).strftime('%Y-%m-%d')
             fut = yf.download(t, start=cutoff_e.get(), end=end, interval='1d', progress=False)
-            if hasattr(fut.columns, 'levels'):
-                fut.columns = [c[0] if isinstance(c, tuple) else c for c in fut.columns]
+            if hasattr(fut.columns, 'levels'): fut.columns = [c[0] if isinstance(c, tuple) else c for c in fut.columns]
             fut = fut.head(h)
-            if fut.empty: _output_q.put(("append", "No future data")); return
-            final = float(fut['Close'].iloc[-1])
-            chg = (final-p)/p*100
+            if fut.empty: _q.put(("put", "No future data")); return
+            final = float(fut['Close'].iloc[-1]); chg = (final-p)/p*100
             ok = (sig.action=='BUY' and chg>0) or (sig.action=='SELL' and chg<0) or (sig.action=='HOLD' and abs(chg)<1.5)
-            _output_q.put(("append", f"ACTUAL: ${p:.2f} -> ${final:.2f} ({chg:+.2f}%)"))
-            _output_q.put(("append", f"VERDICT: {'CORRECT' if ok else 'WRONG'}\n"))
-            for idx, row in fut.iterrows():
-                dc = (float(row['Close'])-p)/p*100
-                _output_q.put(("append", f"  {str(idx)[:10]}: ${float(row['Close']):.2f} ({dc:+.2f}%)"))
-        run_bg(out, app.status, f"Backtest: {t}", work)
+            _q.put(("put", f"  RESULT: ${p:.2f} -> ${final:.2f} ({chg:+.2f}%)"))
+            _q.put(("put", f"  VERDICT: {'CORRECT' if ok else 'WRONG'}\n"))
+            for idx, r in fut.iterrows():
+                dc = (float(r['Close'])-p)/p*100
+                _q.put(("put", f"    {str(idx)[:10]}  ${float(r['Close']):>8.2f}  {dc:+.2f}%"))
+        bg_run(out, app.status, f"Predicting {t}", work)
 
-    ctk.CTkButton(top, text="Test", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=80, fg_color=ACCENT_GREEN, hover_color="#059669").pack(side="left", padx=10)
+    Btn(row, text="Test", color=C["green"], width=80, command=_run).pack(side="left", padx=6)
+    ctk.CTkLabel(card, text="  Start → Cutoff = what bot sees.  Days = how far to reveal.",
+                  font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0,10))
     return f
 
 
-def build_monte_carlo(parent, app):
+def page_monte_carlo(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=80, placeholder_text="AAPL", font=("Segoe UI", 13))
-    sims_e = ctk.CTkEntry(top, width=100, font=("Segoe UI", 12))
-    sims_e.insert(0, "1000000")
-    horizon_e = ctk.CTkEntry(top, width=60, font=("Segoe UI", 12))
-    horizon_e.insert(0, "30")
-    for lbl, w in [("Ticker:",ticker_e),("Sims:",sims_e),("Days:",horizon_e)]:
-        ctk.CTkLabel(top, text=lbl, font=("Segoe UI", 12)).pack(side="left", padx=(8,2))
-        w.pack(side="left")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
+    card = Card(f, title="Monte Carlo Simulation")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=80, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,6))
+    sims_e = Entry(row, width=100); sims_e.insert(0, "1000000"); sims_e.pack(side="left", padx=3)
+    days_e = Entry(row, width=60); days_e.insert(0, "30"); days_e.pack(side="left", padx=3)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
             import numpy as np, yfinance as yf
-            n = int(sims_e.get()); h = int(horizon_e.get())
-            _output_q.put(("append", f"Running {n:,} Monte Carlo simulations for {t} ({h} days)...\n"))
+            n, h = int(sims_e.get()), int(days_e.get())
             df = yf.download(t, period="1y", interval="1d", progress=False)
-            if hasattr(df.columns, 'levels'):
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            if df is None or len(df) < 30: _output_q.put(("append", "No data")); return
+            if hasattr(df.columns, 'levels'): df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            if df is None or len(df)<30: _q.put(("put", "No data")); return
             closes = df['Close'].values.astype(float)
-            returns = np.diff(np.log(closes))
-            mu = returns.mean(); sigma = returns.std()
+            rets = np.diff(np.log(closes))
+            mu, sigma = rets.mean(), rets.std()
             S0 = closes[-1]
-            rng = np.random.default_rng()
-            rand = rng.standard_normal((n, h))
-            paths = S0 * np.exp(np.cumsum((mu - 0.5*sigma**2) + sigma*rand, axis=1))
-            finals = paths[:, -1]
-            _output_q.put(("clear", None))
-            _output_q.put(("append", f"Monte Carlo: {t} | {n:,} sims | {h} days"))
-            _output_q.put(("append", f"Current: ${S0:.2f}\n"))
-            for p_name, p_val in [("5th", 5),("25th",25),("50th (median)",50),("75th",75),("95th",95)]:
-                v = np.percentile(finals, p_val)
-                chg = (v-S0)/S0*100
-                _output_q.put(("append", f"  {p_name}: ${v:.2f} ({chg:+.1f}%)"))
-            _output_q.put(("append", f"\n  Mean: ${finals.mean():.2f} ({(finals.mean()-S0)/S0*100:+.1f}%)"))
-            _output_q.put(("append", f"  Prob up: {(finals>S0).mean()*100:.1f}%"))
-            _output_q.put(("append", f"  Prob >5%: {(finals>S0*1.05).mean()*100:.1f}%"))
-            _output_q.put(("append", f"  Prob <-5%: {(finals<S0*0.95).mean()*100:.1f}%"))
-            _output_q.put(("status", f"MC: {t} median ${np.median(finals):.2f} ({h}d)"))
-        run_bg(out, app.status, f"Monte Carlo: {t}", work)
+            paths = S0 * np.exp(np.cumsum((mu-0.5*sigma**2)+sigma*np.random.default_rng().standard_normal((n,h)), axis=1))
+            finals = paths[:,-1]
+            _q.put(("clear", None))
+            _q.put(("put", f"  {t} Monte Carlo  |  {n:,} sims  |  {h} days\n"))
+            _q.put(("put", f"  Current Price: ${S0:.2f}\n"))
+            for lbl, pct in [("5th percentile",5),("25th",25),("MEDIAN (50th)",50),("75th",75),("95th",95)]:
+                v = np.percentile(finals, pct); c = (v-S0)/S0*100
+                _q.put(("put", f"  {lbl:<20} ${v:>10.2f}  ({c:+.1f}%)"))
+            _q.put(("put", f"\n  Mean:    ${finals.mean():.2f} ({(finals.mean()-S0)/S0*100:+.1f}%)"))
+            _q.put(("put", f"  Prob up:   {(finals>S0).mean()*100:.1f}%"))
+            _q.put(("put", f"  Prob >5%:  {(finals>S0*1.05).mean()*100:.1f}%"))
+            _q.put(("put", f"  Prob <-5%: {(finals<S0*0.95).mean()*100:.1f}%"))
+        bg_run(out, app.status, f"MC: {t}", work)
 
-    ctk.CTkButton(top, text="Simulate", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=100, fg_color=ACCENT_AMBER, hover_color="#d97706").pack(side="left", padx=10)
+    Btn(row, text="Simulate", color=C["amber"], width=100, command=_run).pack(side="left", padx=6)
+    ctk.CTkLabel(card, text="  Ticker | Simulations | Horizon (days)",
+                  font=(FONT, 11), text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0,10))
     return f
 
 
-def build_portfolio(parent, app):
+def page_portfolio(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
-    def _acct():
+    card = Card(f, title="IBKR Portfolio")
+    card.pack(fill="x", padx=6, pady=6)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    def _run():
         def work():
-            mod = T()
-            b = mod.IBKRTrader()
-            if not b.is_ready():
-                _output_q.put(("append", "IBKR not connected. Start TWS first.")); return
+            b = T().IBKRTrader()
+            if not b.is_ready(): _q.put(("put", "IBKR not connected. Start TWS.")); return
             a = b.get_account()
             if a:
-                _output_q.put(("append", f"  {b.status_line()}\n"))
-                _output_q.put(("append", f"  Cash:         ${a['cash']:,.2f}"))
-                _output_q.put(("append", f"  Equity:       ${a['equity']:,.2f}"))
-                _output_q.put(("append", f"  Buying Power: ${a['buying_power']:,.2f}"))
-            positions = b.list_positions()
-            if positions:
-                _output_q.put(("append", f"\n  Open Positions ({len(positions)}):"))
-                _output_q.put(("append", f"  {'Symbol':<10} {'Qty':>8} {'Side':<6} {'Entry':>10} {'P&L':>12}"))
-                _output_q.put(("append", f"  {'-'*48}"))
-                total = 0
-                for p in positions:
-                    pnl = p.get('unrealized_pl',0); total += pnl
-                    _output_q.put(("append", f"  {p['symbol']:<10} {p['qty']:>8.0f} {p['side']:<6} ${p['avg_entry_price']:>9.2f} ${pnl:>+11.2f}"))
-                _output_q.put(("append", f"  {'-'*48}"))
-                _output_q.put(("append", f"  {'Total':>36} ${total:>+11.2f}"))
-            else:
-                _output_q.put(("append", "\n  No open positions."))
+                _q.put(("put", f"  {b.status_line()}\n"))
+                _q.put(("put", f"  Cash:          ${a['cash']:>12,.2f}"))
+                _q.put(("put", f"  Equity:        ${a['equity']:>12,.2f}"))
+                _q.put(("put", f"  Buying Power:  ${a['buying_power']:>12,.2f}\n"))
+            for p in b.list_positions():
+                pnl = p.get('unrealized_pl',0)
+                _q.put(("put", f"  {p['symbol']:<10} {p['qty']:>6.0f} {p['side']:<5} ${p['avg_entry_price']:>9.2f}  P&L ${pnl:>+10.2f}"))
             b.disconnect()
-        run_bg(out, app.status, "Fetching IBKR", work)
-
-    ctk.CTkButton(top, text="Refresh", command=_acct, font=("Segoe UI", 13, "bold"), width=100).pack(side="left", padx=5)
+        bg_run(out, app.status, "IBKR", work)
+    Btn(card, text="Refresh", color=C["accent"], width=100, command=_run).pack(padx=16, pady=(0,14), anchor="w")
     return f
 
 
-def build_paper(parent, app):
+def page_smart_money(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=8)
-
-    def _load():
-        def work():
-            try:
-                p = Path("results/paper_trades.json")
-                if not p.exists(): _output_q.put(("append", "No paper trades yet.")); return
-                trades = json.loads(p.read_text())
-                if not trades: _output_q.put(("append", "No paper trades.")); return
-                _output_q.put(("append", f"Paper Trades ({len(trades)}):\n"))
-                for t in trades[-20:]:
-                    _output_q.put(("append", f"  {t.get('ticker','?')} {t.get('action','?')} @ ${t.get('entry_price',0):.2f} | "
-                                             f"SL ${t.get('stop_loss',0):.2f} TP ${t.get('take_profit',0):.2f} | {t.get('status','open')}"))
-            except Exception as e: _output_q.put(("append", f"Error: {e}"))
-        run_bg(out, app.status, "Loading paper trades", work)
-
-    ctk.CTkButton(f, text="Load Paper Trades", command=_load, font=("Segoe UI", 13)).pack(padx=10, pady=5, anchor="w")
-    return f
-
-
-def build_smart_money(parent, app):
-    f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
+    card = Card(f, title="Smart Money Detector")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
-            mod = T()
-            df, ind = get_indicators(t, "3mo", "1d")
-            if df is None: _output_q.put(("append", "No data")); return
+            df, ind = get_ind(t, "3mo", "1d")
+            if df is None: _q.put(("put", "No data")); return
             try:
-                sma = mod.SmartMoneyAnalyzer()
-                result = sma.analyze(df)
-                _output_q.put(("append", f"Smart Money Analysis: {t}\n"))
-                _output_q.put(("append", f"  Structure: {result.get('market_structure', '?')}"))
-                for ob in result.get('order_blocks', [])[:5]:
-                    _output_q.put(("append", f"  Order Block: {ob.get('type','?')} @ ${ob.get('price',0):.2f}"))
-                for fvg in result.get('fair_value_gaps', [])[:5]:
-                    _output_q.put(("append", f"  FVG: {fvg.get('type','?')} ${fvg.get('low',0):.2f}-${fvg.get('high',0):.2f}"))
-                for lz in result.get('liquidity_zones', [])[:5]:
-                    _output_q.put(("append", f"  Liquidity: ${lz.get('price',0):.2f} ({lz.get('type','?')})"))
-            except Exception as e:
-                _output_q.put(("append", f"Error: {e}"))
-        run_bg(out, app.status, f"Smart Money: {t}", work)
-
-    ctk.CTkButton(top, text="Detect", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=90, fg_color=ACCENT).pack(side="left", padx=10)
+                sma = T().SmartMoneyAnalyzer(); r = sma.analyze(df)
+                _q.put(("put", f"  Structure: {r.get('market_structure','?')}\n"))
+                for ob in r.get('order_blocks',[])[:8]: _q.put(("put", f"  OB {ob.get('type','?'):>8} @ ${ob.get('price',0):.2f}"))
+                for fvg in r.get('fair_value_gaps',[])[:8]: _q.put(("put", f"  FVG {fvg.get('type','?'):>7} ${fvg.get('low',0):.2f}-${fvg.get('high',0):.2f}"))
+            except Exception as e: _q.put(("put", f"Error: {e}"))
+        bg_run(out, app.status, f"SMC: {t}", work)
+    Btn(row, text="Detect", color=C["accent"], width=90, command=_run).pack(side="left")
     return f
 
 
-def build_multi_tf(parent, app):
+def page_multi_tf(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
+    card = Card(f, title="Multi-Timeframe Analysis")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
-            _output_q.put(("append", f"Multi-Timeframe Analysis: {t}\n"))
-            for tf, per, itv in [("1m (intraday)","5d","1m"),("15m","5d","15m"),("1h","1mo","1h"),("1D","6mo","1d")]:
+            _q.put(("put", f"  Multi-Timeframe: {t}\n"))
+            for tf, per, itv in [("1m","5d","1m"),("15m","5d","15m"),("1h","1mo","1h"),("1D","6mo","1d")]:
                 try:
-                    df, ind = get_indicators(t, per, itv)
+                    _, ind = get_ind(t, per, itv)
                     if ind is None: continue
-                    sig = get_analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=(itv=="1m"))
-                    if sig:
-                        _output_q.put(("append", f"  {tf:>15}: {sig.action} ({sig.confidence:.0f}%) — RSI {ind.rsi_14:.0f}"))
+                    sig = analyzer()._fallback_analysis(t, ind, 100000, 0.01, 2.5, is_day_trading=(itv=="1m"))
+                    if sig: _q.put(("put", f"  {tf:>6}  {sig.action:<5} {sig.confidence:>5.0f}%  RSI {ind.rsi_14:.0f}"))
                 except Exception: continue
-        run_bg(out, app.status, f"Multi-TF: {t}", work)
-
-    ctk.CTkButton(top, text="Analyze", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=90, fg_color=ACCENT).pack(side="left", padx=10)
+        bg_run(out, app.status, f"MTF: {t}", work)
+    Btn(row, text="Analyze", color=C["accent"], width=90, command=_run).pack(side="left")
     return f
 
 
-def build_options(parent, app):
+def page_options(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=80, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
+    card = Card(f, title="Options Chain")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
             import yfinance as yf
             tk = yf.Ticker(t)
-            _output_q.put(("append", f"Options Chain: {t}\n"))
-            try:
-                dates = tk.options[:5]
-                _output_q.put(("append", f"  Expiration dates: {', '.join(dates[:5])}"))
-                if dates:
-                    chain = tk.option_chain(dates[0])
-                    _output_q.put(("append", f"\n  Calls (nearest expiry {dates[0]}):"))
-                    _output_q.put(("append", f"  {'Strike':>10} {'Last':>8} {'Bid':>8} {'Ask':>8} {'Vol':>8} {'OI':>8} {'IV':>8}"))
-                    for _, r in chain.calls.head(10).iterrows():
-                        _output_q.put(("append", f"  ${r['strike']:>9.2f} ${r['lastPrice']:>7.2f} ${r['bid']:>7.2f} ${r['ask']:>7.2f} {r.get('volume',''):>8} {r.get('openInterest',''):>8} {r.get('impliedVolatility',0)*100:>7.1f}%"))
-                    _output_q.put(("append", f"\n  Puts (nearest expiry {dates[0]}):"))
-                    for _, r in chain.puts.head(10).iterrows():
-                        _output_q.put(("append", f"  ${r['strike']:>9.2f} ${r['lastPrice']:>7.2f} ${r['bid']:>7.2f} ${r['ask']:>7.2f} {r.get('volume',''):>8} {r.get('openInterest',''):>8} {r.get('impliedVolatility',0)*100:>7.1f}%"))
-            except Exception as e:
-                _output_q.put(("append", f"Error: {e}"))
-        run_bg(out, app.status, f"Options: {t}", work)
-
-    ctk.CTkButton(top, text="Load Chain", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=110, fg_color=ACCENT).pack(side="left", padx=10)
+            dates = tk.options[:5]
+            _q.put(("put", f"  Expirations: {', '.join(dates[:5])}\n"))
+            if dates:
+                chain = tk.option_chain(dates[0])
+                _q.put(("put", f"  CALLS ({dates[0]}):"))
+                _q.put(("put", f"  {'Strike':>8} {'Last':>8} {'Bid':>8} {'Ask':>8} {'Vol':>8} {'OI':>8} {'IV':>7}"))
+                for _, r in chain.calls.head(12).iterrows():
+                    _q.put(("put", f"  ${r['strike']:>7.2f} ${r['lastPrice']:>7.2f} ${r['bid']:>7.2f} ${r['ask']:>7.2f} {str(r.get('volume','')):>8} {str(r.get('openInterest','')):>8} {r.get('impliedVolatility',0)*100:>6.1f}%"))
+                _q.put(("put", f"\n  PUTS ({dates[0]}):"))
+                for _, r in chain.puts.head(12).iterrows():
+                    _q.put(("put", f"  ${r['strike']:>7.2f} ${r['lastPrice']:>7.2f} ${r['bid']:>7.2f} ${r['ask']:>7.2f} {str(r.get('volume','')):>8} {str(r.get('openInterest','')):>8} {r.get('impliedVolatility',0)*100:>6.1f}%"))
+        bg_run(out, app.status, f"Options: {t}", work)
+    Btn(row, text="Load", color=C["accent"], width=80, command=_run).pack(side="left")
     return f
 
 
-def build_insider(parent, app):
+def page_insider(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    ticker_e = ctk.CTkEntry(top, width=100, placeholder_text="AAPL", font=("Segoe UI", 13))
-    ctk.CTkLabel(top, text="Ticker:", font=("Segoe UI", 13)).pack(side="left")
-    ticker_e.pack(side="left", padx=5)
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
+    card = Card(f, title="Insider Trading")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    ticker_e = Entry(row, width=110, placeholder_text="AAPL"); ticker_e.pack(side="left", padx=(0,8))
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         t = ticker_e.get().strip().upper()
         if not t: return
         def work():
             fh = os.getenv('FINNHUB_API_KEY','')
-            if not fh: _output_q.put(("append", "Need FINNHUB_API_KEY")); return
+            if not fh: _q.put(("put", "Need FINNHUB_API_KEY")); return
             import requests
             r = requests.get(f"https://finnhub.io/api/v1/stock/insider-transactions?symbol={t}&token={fh}", timeout=8)
-            if r.status_code != 200: _output_q.put(("append", f"API error {r.status_code}")); return
-            data = r.json().get('data', [])
-            _output_q.put(("append", f"Insider Transactions: {t} ({len(data)} recent)\n"))
-            for tx in data[:15]:
-                name = tx.get('name','?')
-                shares = tx.get('share', 0)
-                price = tx.get('transactionPrice', 0)
-                code = tx.get('transactionCode', '?')
-                date = tx.get('filingDate', '?')
-                action = "BUY" if code in ('P','A') else "SELL" if code == 'S' else code
-                _output_q.put(("append", f"  {date} {action:>4} {name[:25]:<25} {shares:>10,} @ ${price:.2f}"))
-        run_bg(out, app.status, f"Insider: {t}", work)
-
-    ctk.CTkButton(top, text="Check Insiders", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=120, fg_color=ACCENT).pack(side="left", padx=10)
+            data = r.json().get('data',[])
+            _q.put(("put", f"  {len(data)} insider transactions\n"))
+            for tx in data[:20]:
+                act = "BUY" if tx.get('transactionCode','') in ('P','A') else "SELL" if tx.get('transactionCode')=='S' else tx.get('transactionCode','?')
+                _q.put(("put", f"  {tx.get('filingDate','?'):>10}  {act:>4}  {tx.get('name','?')[:25]:<25}  {tx.get('share',0):>10,} sh  ${tx.get('transactionPrice',0):.2f}"))
+        bg_run(out, app.status, f"Insider: {t}", work)
+    Btn(row, text="Check", color=C["accent"], width=80, command=_run).pack(side="left")
     return f
 
 
-def build_political(parent, app):
+def page_political(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=8)
+    card = Card(f, title="Congressional Trades")
+    card.pack(fill="x", padx=6, pady=6)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         def work():
-            _output_q.put(("append", "Political Trades Tracker\n"))
-            _output_q.put(("append", "Fetching congressional trading disclosures...\n"))
-            try:
-                import requests
-                r = requests.get("https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json", timeout=15)
-                if r.status_code == 200:
-                    trades = r.json()[-20:]
-                    for tx in trades:
-                        _output_q.put(("append", f"  {tx.get('transaction_date','?')} {tx.get('representative','?')[:20]:<20} "
-                                                 f"{tx.get('type','?'):>10} {tx.get('ticker','?'):<6} {tx.get('amount','?')}"))
-                else:
-                    _output_q.put(("append", "Could not fetch data"))
-            except Exception as e:
-                _output_q.put(("append", f"Error: {e}"))
-        run_bg(out, app.status, "Political trades", work)
-    ctk.CTkButton(f, text="Fetch Congressional Trades", command=_run,
-                   font=("Segoe UI", 13), width=200).pack(padx=10, pady=8, anchor="w")
+            import requests
+            r = requests.get("https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json", timeout=15)
+            if r.status_code == 200:
+                for tx in r.json()[-25:]:
+                    _q.put(("put", f"  {tx.get('transaction_date','?'):>10}  {tx.get('representative','?')[:22]:<22}  {tx.get('type','?'):>12}  {tx.get('ticker','?'):<6}  {tx.get('amount','?')}"))
+        bg_run(out, app.status, "Political", work)
+    Btn(card, text="Fetch Trades", color=C["accent"], width=120, command=_run).pack(padx=16, pady=(0,14), anchor="w")
     return f
 
 
-def build_quant(parent, app):
+def page_paper(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=8)
+    card = Card(f, title="Paper Trading")
+    card.pack(fill="x", padx=6, pady=6)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         def work():
-            _output_q.put(("append", "Quantitative Strategies\n"))
-            _output_q.put(("append", "Use the terminal (Trading.py) for full quant access:"))
-            _output_q.put(("append", "  - Momentum Strategy"))
-            _output_q.put(("append", "  - Mean Reversion"))
-            _output_q.put(("append", "  - Pairs Trading"))
-            _output_q.put(("append", "  - Statistical Arbitrage"))
-            _output_q.put(("append", "  - Risk Parity"))
-            _output_q.put(("append", "\nRun: python Trading.py -> Option 15"))
-        run_bg(out, app.status, "Quant strategies", work)
-    ctk.CTkButton(f, text="Show Strategies", command=_run, font=("Segoe UI", 13)).pack(padx=10, pady=8, anchor="w")
+            p = Path("results/paper_trades.json")
+            if not p.exists(): _q.put(("put", "No paper trades yet.")); return
+            trades = json.loads(p.read_text())
+            for t in trades[-20:]:
+                _q.put(("put", f"  {t.get('ticker','?'):<8} {t.get('action','?'):<5} ${t.get('entry_price',0):.2f}  SL ${t.get('stop_loss',0):.2f}  TP ${t.get('take_profit',0):.2f}  {t.get('status','open')}"))
+        bg_run(out, app.status, "Paper trades", work)
+    Btn(card, text="Load Trades", color=C["accent"], width=120, command=_run).pack(padx=16, pady=(0,14), anchor="w")
     return f
 
 
-def build_journal(parent, app):
+def page_sizing(parent, app):
     f = ctk.CTkFrame(parent, fg_color="transparent")
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=8)
+    card = Card(f, title="Position Sizing Calculator")
+    card.pack(fill="x", padx=6, pady=6)
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=(0,14))
+    entries = {}
+    for lbl, default in [("Account $","100000"),("Risk %","1.0"),("Entry $","150"),("Stop $","145")]:
+        ctk.CTkLabel(row, text=lbl, font=(FONT, 11), text_color=C["text2"]).pack(side="left", padx=(8,2))
+        e = Entry(row, width=80); e.insert(0, default); e.pack(side="left", padx=2)
+        entries[lbl] = e
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
+    def _run():
+        def work():
+            acct=float(entries["Account $"].get()); risk=float(entries["Risk %"].get())/100
+            entry=float(entries["Entry $"].get()); sl=float(entries["Stop $"].get())
+            rps=abs(entry-sl)
+            if rps<=0: _q.put(("put", "SL must differ from entry")); return
+            rd=acct*risk; shares=int(rd/rps)
+            _q.put(("clear",None))
+            _q.put(("put", f"  Account:    ${acct:>12,.2f}"))
+            _q.put(("put", f"  Risk:       {risk*100:.1f}% = ${rd:,.2f}"))
+            _q.put(("put", f"  Entry:      ${entry:.2f}  |  SL: ${sl:.2f}"))
+            _q.put(("put", f"  Risk/Share: ${rps:.2f}\n"))
+            _q.put(("put", f"  Shares:     {shares}"))
+            _q.put(("put", f"  Notional:   ${shares*entry:,.2f}"))
+            _q.put(("put", f"  Max Loss:   ${shares*rps:,.2f}"))
+        bg_run(out, app.status, "Sizing", work)
+    Btn(row, text="Calculate", color=C["accent"], width=100, command=_run).pack(side="left", padx=8)
+    return f
+
+
+def page_journal(parent, app):
+    f = ctk.CTkFrame(parent, fg_color="transparent")
+    card = Card(f, title="Trade Journal")
+    card.pack(fill="x", padx=6, pady=6)
+    out = Output(f)
+    out.pack(fill="both", expand=True, padx=6, pady=(0,6))
     def _run():
         def work():
             p = Path("logs/auto_trades.jsonl")
-            if not p.exists(): _output_q.put(("append", "No trade journal entries yet.")); return
+            if not p.exists(): _q.put(("put", "No trades logged yet.")); return
             lines = p.read_text().strip().split('\n')
-            _output_q.put(("append", f"Trade Journal ({len(lines)} entries):\n"))
-            _output_q.put(("append", f"{'Date':<22} {'Ticker':<8} {'Action':<6} {'Entry':>10} {'SL':>10} {'TP':>10} {'Conf':>6} {'Channel':>8}"))
-            _output_q.put(("append", "-"*80))
-            for line in lines[-25:]:
+            _q.put(("put", f"  {len(lines)} trades logged\n"))
+            _q.put(("put", f"  {'Date':<20} {'Ticker':<8} {'Action':<6} {'Entry':>9} {'SL':>9} {'TP':>9} {'Conf':>5} {'Ch':>6}"))
+            _q.put(("put", f"  {'-'*75}"))
+            for line in lines[-30:]:
                 try:
                     t = json.loads(line)
-                    _output_q.put(("append", f"{t['time'][:19]:<22} {t['ticker']:<8} {t['action']:<6} "
-                                             f"${t['entry']:>9.2f} ${t['stop_loss']:>9.2f} ${t['take_profit']:>9.2f} "
-                                             f"{t['confidence']:>5.0f}% {t['channel']:>8}"))
+                    _q.put(("put", f"  {t['time'][:19]:<20} {t['ticker']:<8} {t['action']:<6} ${t['entry']:>8.2f} ${t['stop_loss']:>8.2f} ${t['take_profit']:>8.2f} {t['confidence']:>4.0f}% {t['channel']:>6}"))
                 except Exception: pass
-        run_bg(out, app.status, "Trade journal", work)
-    ctk.CTkButton(f, text="Load Journal", command=_run, font=("Segoe UI", 13)).pack(padx=10, pady=8, anchor="w")
+        bg_run(out, app.status, "Journal", work)
+    Btn(card, text="Load Journal", color=C["accent"], width=120, command=_run).pack(padx=16, pady=(0,14), anchor="w")
     return f
 
 
-def build_sizing(parent, app):
-    f = ctk.CTkFrame(parent, fg_color="transparent")
-    top = ctk.CTkFrame(f, fg_color="transparent")
-    top.pack(fill="x", padx=10, pady=8)
-    entries = {}
-    for lbl, default, w in [("Account $:","100000",100),("Risk %:","1.0",60),("Entry $:","150",80),("SL $:","145",80)]:
-        ctk.CTkLabel(top, text=lbl, font=("Segoe UI", 12)).pack(side="left", padx=(8,2))
-        e = ctk.CTkEntry(top, width=w, font=("Segoe UI", 12))
-        e.insert(0, default)
-        e.pack(side="left")
-        entries[lbl] = e
-    out = OutputPanel(f)
-    out.pack(fill="both", expand=True, padx=10, pady=(0,8))
-
-    def _run():
-        def work():
-            acct = float(entries["Account $:"].get())
-            risk = float(entries["Risk %:"].get()) / 100
-            entry = float(entries["Entry $:"].get())
-            sl = float(entries["SL $:"].get())
-            risk_per_share = abs(entry - sl)
-            if risk_per_share <= 0: _output_q.put(("append", "SL must differ from entry")); return
-            risk_dollars = acct * risk
-            shares = int(risk_dollars / risk_per_share)
-            notional = shares * entry
-            _output_q.put(("clear", None))
-            _output_q.put(("append", f"Position Sizing Calculator\n"))
-            _output_q.put(("append", f"  Account:       ${acct:,.2f}"))
-            _output_q.put(("append", f"  Risk:          {risk*100:.1f}% = ${risk_dollars:,.2f}"))
-            _output_q.put(("append", f"  Entry:         ${entry:.2f}"))
-            _output_q.put(("append", f"  Stop Loss:     ${sl:.2f}"))
-            _output_q.put(("append", f"  Risk/Share:    ${risk_per_share:.2f}"))
-            _output_q.put(("append", f"\n  Position Size: {shares} shares"))
-            _output_q.put(("append", f"  Notional:      ${notional:,.2f}"))
-            _output_q.put(("append", f"  Max Loss:      ${shares * risk_per_share:,.2f}"))
-        run_bg(out, app.status, "Sizing", work)
-
-    ctk.CTkButton(top, text="Calculate", command=_run, font=("Segoe UI", 13, "bold"),
-                   width=90, fg_color=ACCENT).pack(side="left", padx=10)
-    return f
-
-
-def build_settings(parent, app):
-    f = ctk.CTkFrame(parent, fg_color="transparent")
-    scroll = ctk.CTkScrollableFrame(f, fg_color="transparent")
-    scroll.pack(fill="both", expand=True, padx=10, pady=8)
-
-    ctk.CTkLabel(scroll, text="API Keys", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0,8))
+def page_settings(parent, app):
+    f = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+    # API Keys
+    card1 = Card(f, title="API Keys")
+    card1.pack(fill="x", padx=6, pady=6)
     key_entries = {}
-    for env_name, label in [("FINNHUB_API_KEY","Finnhub"),("GROQ_API_KEY","Groq"),
-                             ("NEWSDATA_API_KEY","NewsData"),("NEWS_API_KEY","News API"),
-                             ("ANTHROPIC_API_KEY","Anthropic")]:
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=2)
-        ctk.CTkLabel(row, text=label, font=("Segoe UI", 12), width=120, anchor="w").pack(side="left")
-        e = ctk.CTkEntry(row, show="*", font=("Segoe UI", 12))
-        e.pack(side="left", fill="x", expand=True, padx=5)
-        val = os.getenv(env_name, "")
+    for env, label in [("FINNHUB_API_KEY","Finnhub"),("GROQ_API_KEY","Groq"),("NEWSDATA_API_KEY","NewsData"),
+                        ("NEWS_API_KEY","News API"),("ANTHROPIC_API_KEY","Anthropic")]:
+        row = ctk.CTkFrame(card1, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=2)
+        ctk.CTkLabel(row, text=label, font=(FONT, 12), width=100, anchor="w").pack(side="left")
+        e = Entry(row, show="*"); e.pack(side="left", fill="x", expand=True, padx=4)
+        val = os.getenv(env,"")
         if val: e.insert(0, val)
-        key_entries[env_name] = e
-
+        key_entries[env] = e
     def save_keys():
         env_path = REPO / ".env"
         lines = env_path.read_text().splitlines() if env_path.exists() else []
-        for env_name, entry in key_entries.items():
+        for env, entry in key_entries.items():
             val = entry.get().strip()
             if val:
-                os.environ[env_name] = val
+                os.environ[env] = val
                 found = False
-                for i, line in enumerate(lines):
-                    if line.startswith(f"{env_name}="):
-                        lines[i] = f'{env_name}="{val}"'; found = True; break
-                if not found: lines.append(f'{env_name}="{val}"')
-        env_path.write_text("\n".join(lines) + "\n")
-        messagebox.showinfo("Saved", "API keys saved")
+                for i, l in enumerate(lines):
+                    if l.startswith(f"{env}="): lines[i] = f'{env}="{val}"'; found = True; break
+                if not found: lines.append(f'{env}="{val}"')
+        env_path.write_text("\n".join(lines)+"\n")
+        messagebox.showinfo("Saved", "Keys saved to .env")
+    Btn(card1, text="Save Keys", width=100, command=save_keys).pack(padx=16, pady=(4,14), anchor="w")
 
-    ctk.CTkButton(scroll, text="Save Keys", command=save_keys, width=100).pack(anchor="w", pady=8)
-
-    ctk.CTkLabel(scroll, text="Trading Config", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(15,8))
+    # Config
+    card2 = Card(f, title="Trading Configuration")
+    card2.pack(fill="x", padx=6, pady=6)
     try: config = json.loads(Path("config/config.json").read_text())
     except Exception: config = {}
     cfg_entries = {}
     for key, label, default in [("account_size","Account Size ($)",100000),("auto_trade_risk_pct","Risk/Trade (%)",1.0),
                                  ("auto_trade_max_daily","Max Trades/Day",30),("auto_trade_max_open_positions","Max Positions",8),
-                                 ("auto_trade_max_daily_loss_pct","Daily Loss Limit (%)",5.0),("auto_trade_min_confidence","Min Confidence (%)",80)]:
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=2)
-        ctk.CTkLabel(row, text=label, font=("Segoe UI", 12), width=180, anchor="w").pack(side="left")
-        e = ctk.CTkEntry(row, width=100, font=("Segoe UI", 12))
-        e.insert(0, str(config.get(key, default)))
-        e.pack(side="left", padx=5)
+                                 ("auto_trade_max_daily_loss_pct","Loss Limit (%)",5.0),("auto_trade_min_confidence","Min Conf (%)",80)]:
+        row = ctk.CTkFrame(card2, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=2)
+        ctk.CTkLabel(row, text=label, font=(FONT, 12), width=160, anchor="w").pack(side="left")
+        e = Entry(row, width=100); e.insert(0, str(config.get(key, default))); e.pack(side="left", padx=4)
         cfg_entries[key] = e
-
-    def save_config():
+    def save_cfg():
         try: c = json.loads(Path("config/config.json").read_text())
         except Exception: c = {}
         for k, e in cfg_entries.items():
             try: c[k] = float(e.get())
-            except Exception: pass
+            except: pass
         Path("config/config.json").write_text(json.dumps(c, indent=2))
         messagebox.showinfo("Saved", "Config saved")
+    Btn(card2, text="Save Config", width=110, command=save_cfg).pack(padx=16, pady=(4,14), anchor="w")
 
-    ctk.CTkButton(scroll, text="Save Config", command=save_config, width=100).pack(anchor="w", pady=8)
-
-    ctk.CTkLabel(scroll, text="Broker", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(15,8))
+    # Broker
+    card3 = Card(f, title="Broker")
+    card3.pack(fill="x", padx=6, pady=6)
     broker_v = StringVar(value=os.getenv("BROKER","alpaca"))
-    ctk.CTkSegmentedButton(scroll, values=["alpaca","ibkr"], variable=broker_v).pack(anchor="w")
-    ctk.CTkLabel(scroll, text="IBKR needs TWS running on port 7497", font=("Segoe UI", 11), text_color=TEXT_DIM).pack(anchor="w", pady=3)
+    ctk.CTkSegmentedButton(card3, values=["alpaca","ibkr"], variable=broker_v,
+                            font=(FONT, 12), height=36).pack(padx=16, pady=(4,6), anchor="w")
+    ctk.CTkLabel(card3, text="IBKR: start TWS on port 7497 before connecting",
+                  font=(FONT, 11), text_color=C["text3"]).pack(padx=16, pady=(0,14), anchor="w")
     return f
 
 
-# ═══════════════════════════════════════════════════════════
-# MAIN APP WITH SIDEBAR NAVIGATION
-# ═══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
+# MAIN APP
+# ═══════════════════════════════════════════════════
 
 class StatusBar(ctk.CTkFrame):
     def __init__(self, parent, **kw):
-        super().__init__(parent, height=28, fg_color=BG_SIDEBAR, **kw)
-        self.label = ctk.CTkLabel(self, text="Ready", font=("Segoe UI", 11), text_color=TEXT_DIM, anchor="w")
-        self.label.pack(side="left", padx=10, fill="x", expand=True)
-    def set(self, text):
-        self.label.configure(text=text)
+        super().__init__(parent, height=28, fg_color=C["sidebar"], corner_radius=0, **kw)
+        self.l = ctk.CTkLabel(self, text="Ready", font=(FONT, 10), text_color=C["text3"], anchor="w")
+        self.l.pack(side="left", padx=12, fill="x", expand=True)
+    def set(self, t): self.l.configure(text=t)
 
 
-class FinalAIApp(ctk.CTk):
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("FinalAI Quantum")
-        self.geometry("1280x800")
-        self.minsize(1000, 650)
-        self.configure(fg_color=BG_DARK)
+        self.geometry("1300x820")
+        self.minsize(1050, 680)
+        self.configure(fg_color=C["bg"])
 
         # Header
-        header = ctk.CTkFrame(self, height=48, fg_color=BG_SIDEBAR, corner_radius=0)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        ctk.CTkLabel(header, text="  FinalAI Quantum", font=("Segoe UI", 18, "bold"),
-                      text_color="#60a5fa").pack(side="left", padx=8)
-        ctk.CTkLabel(header, text="Trading Intelligence Platform",
-                      font=("Segoe UI", 11), text_color=TEXT_DIM).pack(side="left", padx=5)
+        hdr = ctk.CTkFrame(self, height=52, fg_color=C["sidebar"], corner_radius=0)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="    FinalAI Quantum", font=(FONT, 20, "bold"), text_color=C["accent"]).pack(side="left")
+        ctk.CTkLabel(hdr, text="v7.0", font=(FONT, 11), text_color=C["text3"]).pack(side="left", padx=6)
 
-        # Main area
-        main = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
-        main.pack(fill="both", expand=True)
+        # Body
+        body = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0)
+        body.pack(fill="both", expand=True)
 
         # Sidebar
-        sidebar = ctk.CTkScrollableFrame(main, width=200, fg_color=BG_SIDEBAR, corner_radius=0)
-        sidebar.pack(side="left", fill="y")
+        sb = ctk.CTkScrollableFrame(body, width=195, fg_color=C["sidebar"], corner_radius=0,
+                                     scrollbar_button_color=C["sidebar"])
+        sb.pack(side="left", fill="y")
 
         # Content
-        self.content = ctk.CTkFrame(main, fg_color=BG_DARK, corner_radius=0)
+        self.content = ctk.CTkFrame(body, fg_color=C["bg"], corner_radius=0)
         self.content.pack(side="left", fill="both", expand=True)
 
         # Status
@@ -857,107 +815,96 @@ class FinalAIApp(ctk.CTk):
         self.status.pack(fill="x")
 
         # Pages
-        self.pages = {}
-        self.current_page = None
-
         MENU = [
+            ("HOME", [("Dashboard", "home", "")]),
             ("ANALYSIS", [
-                ("Analyze Ticker", "analyze", ACCENT),
-                ("Market Scanner", "scanner", ACCENT),
-                ("News Intel", "news", ACCENT),
-                ("Smart Money", "smart_money", ACCENT),
-                ("Multi-Timeframe", "multi_tf", ACCENT),
+                ("Analyze Ticker", "analyze", ""),
+                ("Market Scanner", "scanner", ""),
+                ("News Intel", "news", ""),
+                ("Smart Money", "smart_money", ""),
+                ("Multi-Timeframe", "multi_tf", ""),
             ]),
             ("AI & SWARM", [
-                ("Swarm AI (12 agents)", "swarm", ACCENT_PURPLE),
-                ("Blind Prediction", "backtest", ACCENT_GREEN),
+                ("Swarm AI", "swarm", ""),
+                ("Blind Prediction", "backtest", ""),
             ]),
             ("TRADING", [
-                ("Portfolio (IBKR)", "portfolio", ACCENT),
-                ("Paper Trading", "paper", ACCENT),
-                ("Position Sizing", "sizing", ACCENT),
-                ("Trade Journal", "journal", ACCENT),
+                ("Portfolio (IBKR)", "portfolio", ""),
+                ("Paper Trading", "paper", ""),
+                ("Position Sizing", "sizing", ""),
+                ("Trade Journal", "journal", ""),
             ]),
             ("QUANT LAB", [
-                ("Monte Carlo", "monte_carlo", ACCENT_AMBER),
-                ("Options Chain", "options", ACCENT),
-                ("Quant Strategies", "quant", ACCENT),
+                ("Monte Carlo", "monte_carlo", ""),
+                ("Options Chain", "options", ""),
             ]),
             ("RESEARCH", [
-                ("Insider Trading", "insider", ACCENT),
-                ("Political Trades", "political", ACCENT),
+                ("Insider Trading", "insider", ""),
+                ("Political Trades", "political", ""),
             ]),
-            ("SYSTEM", [
-                ("Settings", "settings", ACCENT),
-            ]),
+            ("SYSTEM", [("Settings", "settings", "")]),
         ]
 
         builders = {
-            "analyze": build_analyze, "scanner": build_scanner, "news": build_news,
-            "swarm": build_swarm, "backtest": build_backtest, "monte_carlo": build_monte_carlo,
-            "portfolio": build_portfolio, "paper": build_paper, "smart_money": build_smart_money,
-            "multi_tf": build_multi_tf, "options": build_options, "insider": build_insider,
-            "political": build_political, "quant": build_quant, "journal": build_journal,
-            "sizing": build_sizing, "settings": build_settings,
+            "home": page_dashboard, "analyze": page_analyze, "scanner": page_scanner,
+            "news": page_news, "swarm": page_swarm, "backtest": page_backtest,
+            "monte_carlo": page_monte_carlo, "portfolio": page_portfolio,
+            "smart_money": page_smart_money, "multi_tf": page_multi_tf,
+            "options": page_options, "insider": page_insider, "political": page_political,
+            "paper": page_paper, "sizing": page_sizing, "journal": page_journal,
+            "settings": page_settings,
         }
 
-        self.nav_buttons = {}
+        self.pages = {}
+        self.btns = {}
+        self.current = None
+
         for section, items in MENU:
-            ctk.CTkLabel(sidebar, text=section, font=("Segoe UI", 10, "bold"),
-                          text_color=TEXT_DIM).pack(anchor="w", padx=12, pady=(12, 4))
-            for label, key, color in items:
-                btn = ctk.CTkButton(sidebar, text=f"  {label}", font=("Segoe UI", 12),
-                                     fg_color="transparent", hover_color="#1e293b",
-                                     text_color=TEXT_LIGHT, anchor="w", height=32,
+            ctk.CTkLabel(sb, text=f"  {section}", font=(FONT, 9, "bold"),
+                          text_color=C["text3"]).pack(anchor="w", padx=8, pady=(14, 4))
+            for label, key, _ in items:
+                btn = ctk.CTkButton(sb, text=f"   {label}", font=(FONT, 12),
+                                     fg_color="transparent", hover_color=C["hover"],
+                                     text_color=C["text"], anchor="w", height=34,
+                                     corner_radius=8,
                                      command=lambda k=key: self.show_page(k))
                 btn.pack(fill="x", padx=6, pady=1)
-                self.nav_buttons[key] = btn
+                self.btns[key] = btn
+                self.pages[key] = builders[key](self.content, self)
 
-                # Build page
-                page = builders[key](self.content, self)
-                self.pages[key] = page
-
-        # Show first page
-        self.show_page("analyze")
-
-        # Queue processor
-        self._process_queue()
-
-        # Status
-        broker = os.getenv("BROKER", "alpaca").upper()
-        fh = "OK" if os.getenv("FINNHUB_API_KEY") else "?"
-        groq = "OK" if os.getenv("GROQ_API_KEY") else "?"
-        self.status.set(f"Broker: {broker} | Finnhub: {fh} | Groq: {groq} | Ready")
+        self.show_page("home")
+        self._poll()
+        broker = os.getenv("BROKER","alpaca").upper()
+        self.status.set(f"Broker: {broker}  |  Finnhub: {'OK' if os.getenv('FINNHUB_API_KEY') else '?'}  |  Groq: {'OK' if os.getenv('GROQ_API_KEY') else '?'}")
 
     def show_page(self, key):
-        if self.current_page:
-            self.pages[self.current_page].pack_forget()
-            self.nav_buttons[self.current_page].configure(fg_color="transparent")
+        if self.current:
+            self.pages[self.current].pack_forget()
+            self.btns[self.current].configure(fg_color="transparent")
         self.pages[key].pack(fill="both", expand=True)
-        self.nav_buttons[key].configure(fg_color="#1e3a5f")
-        self.current_page = key
+        self.btns[key].configure(fg_color=C["active"])
+        self.current = key
 
-    def _process_queue(self):
+    def _poll(self):
         try:
             while True:
-                cmd, data = _output_q.get_nowait()
-                # Find visible output panel
-                page = self.pages.get(self.current_page)
-                panel = None
-                if page:
-                    for child in page.winfo_children():
-                        if isinstance(child, OutputPanel):
-                            panel = child; break
-                        for sub in child.winfo_children():
-                            if isinstance(sub, OutputPanel):
-                                panel = sub; break
-                if cmd == "append" and panel: panel.append(data)
+                cmd, data = _q.get_nowait()
+                page = self.pages.get(self.current)
+                panel = self._find_output(page)
+                if cmd == "put" and panel: panel.put(data)
                 elif cmd == "clear" and panel: panel.clear()
                 elif cmd == "status": self.status.set(data)
         except queue.Empty: pass
-        self.after(80, self._process_queue)
+        self.after(80, self._poll)
+
+    def _find_output(self, widget):
+        if widget is None: return None
+        if isinstance(widget, Output): return widget
+        for child in widget.winfo_children():
+            r = self._find_output(child)
+            if r: return r
+        return None
 
 
 if __name__ == "__main__":
-    app = FinalAIApp()
-    app.mainloop()
+    App().mainloop()
