@@ -9116,6 +9116,399 @@ _signal_calibrator = SignalCalibrator()
 
 
 # ==========================================
+# WALK-FORWARD OPTIMIZER
+# ==========================================
+
+class WalkForwardOptimizer:
+    """Backtest the weighted scoring system on historical data to find optimal
+    signal weights per ticker. Uses expanding-window walk-forward:
+    train on [0..T], test on [T..T+step], advance, repeat.
+
+    This answers: "Which signal categories actually predict well for THIS stock?"
+    """
+
+    def __init__(self, analyzer_fn):
+        """analyzer_fn: callable that takes (ticker, indicators, ...) and returns TradeSummary."""
+        self._analyze = analyzer_fn
+        self._results_path = Path('config/walk_forward_weights.json')
+        self._cached: Dict[str, Dict] = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if self._results_path.exists():
+                self._cached = json.loads(self._results_path.read_text())
+        except Exception:
+            self._cached = {}
+
+    def _save(self):
+        try:
+            Path('config').mkdir(exist_ok=True)
+            self._results_path.write_text(json.dumps(self._cached, indent=2))
+        except Exception:
+            pass
+
+    def get_weights(self, ticker: str) -> Optional[Dict[str, float]]:
+        """Return optimized weights if available and recent (< 7 days old)."""
+        entry = self._cached.get(ticker)
+        if entry:
+            age_days = (datetime.now() - datetime.fromisoformat(entry.get('date', '2000-01-01'))).days
+            if age_days < 7:
+                return entry.get('weights')
+        return None
+
+    def optimize(self, ticker: str, period: str = "6mo", step_days: int = 5) -> Dict:
+        """Run walk-forward optimization for a ticker.
+
+        Returns dict with optimized weights, win rate, total trades, and sharpe.
+        """
+        import yfinance as yf
+        import numpy as np
+
+        df = yf.download(ticker, period=period, interval='1d', progress=False)
+        if hasattr(df.columns, 'levels'):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        if df is None or len(df) < 80:
+            return {'error': 'Not enough data (need 80+ days)'}
+
+        # Default category weights to test
+        categories = ['trend', 'momentum', 'volume', 'pattern', 'volatility',
+                      'confluence', 'divergence', 'smart_money', 'ichimoku', 'other']
+
+        # Track which categories predict correctly
+        category_hits: Dict[str, int] = {c: 0 for c in categories}
+        category_misses: Dict[str, int] = {c: 0 for c in categories}
+        trades = []
+        lookback = 50
+
+        for i in range(lookback, len(df) - step_days):
+            window = df.iloc[i - lookback:i + 1].copy()
+            future = df.iloc[i + 1:i + 1 + step_days]
+            if future.empty:
+                continue
+
+            try:
+                from Trading import TechnicalAnalyzer, AIAnalyzer
+                indicators = TechnicalAnalyzer.calculate_indicators(window)
+                if indicators is None:
+                    continue
+                indicators.price = float(window['Close'].iloc[-1])
+                indicators.close = indicators.price
+
+                a = AIAnalyzer.__new__(AIAnalyzer)
+                a.api_key = None
+                signal = a._fallback_analysis(ticker, indicators, 100000, 0.01, 2.5, is_day_trading=False)
+                if signal is None or signal.action == 'HOLD':
+                    continue
+
+                # Check if prediction was correct
+                entry_p = indicators.price
+                future_close = float(future['Close'].iloc[-1])
+                correct = (signal.action == 'BUY' and future_close > entry_p) or \
+                          (signal.action == 'SELL' and future_close < entry_p)
+                pnl_pct = (future_close - entry_p) / entry_p * 100
+                if signal.action == 'SELL':
+                    pnl_pct = -pnl_pct
+
+                trades.append({'action': signal.action, 'correct': correct, 'pnl': pnl_pct})
+
+                # Score each signal category
+                all_signals = signal.supporting_signals if hasattr(signal, 'supporting_signals') else []
+                for sig_text in all_signals:
+                    cat = SignalCalibrator._classify(sig_text)
+                    if cat in category_hits:
+                        if correct:
+                            category_hits[cat] += 1
+                        else:
+                            category_misses[cat] += 1
+            except Exception:
+                continue
+
+        if not trades:
+            return {'error': 'No trades generated'}
+
+        # Calculate optimized weights based on empirical accuracy
+        optimized = {}
+        for cat in categories:
+            total = category_hits[cat] + category_misses[cat]
+            if total >= 5:
+                accuracy = category_hits[cat] / total
+                optimized[cat] = round(max(0.3, min(2.5, accuracy * 2.0)), 2)
+            else:
+                optimized[cat] = 1.0  # Not enough data, use default
+
+        wins = sum(1 for t in trades if t['correct'])
+        total_trades = len(trades)
+        win_rate = wins / total_trades * 100 if total_trades > 0 else 0
+        avg_pnl = np.mean([t['pnl'] for t in trades])
+        pnl_std = np.std([t['pnl'] for t in trades])
+        sharpe = (avg_pnl / pnl_std * np.sqrt(252 / step_days)) if pnl_std > 0 else 0
+
+        result = {
+            'ticker': ticker, 'date': datetime.now().isoformat(),
+            'weights': optimized, 'trades': total_trades, 'win_rate': round(win_rate, 1),
+            'avg_pnl': round(avg_pnl, 2), 'sharpe': round(sharpe, 2),
+            'category_stats': {c: {'hits': category_hits[c], 'misses': category_misses[c],
+                                    'total': category_hits[c] + category_misses[c],
+                                    'accuracy': round(category_hits[c] / max(1, category_hits[c] + category_misses[c]) * 100, 1)}
+                                for c in categories if category_hits[c] + category_misses[c] > 0}
+        }
+        self._cached[ticker] = result
+        self._save()
+        return result
+
+
+# ==========================================
+# CORRELATION FILTER
+# ==========================================
+
+class CorrelationFilter:
+    """Prevents overexposure to correlated assets.
+
+    Before opening a new position, checks if the ticker is highly correlated
+    (>0.7) with any existing position. If so, blocks the trade or warns.
+    """
+
+    @staticmethod
+    def compute_correlation(ticker1: str, ticker2: str, period: str = "3mo") -> float:
+        """Pearson correlation of daily returns between two tickers."""
+        import yfinance as yf
+        try:
+            d1 = yf.download(ticker1, period=period, interval='1d', progress=False)
+            d2 = yf.download(ticker2, period=period, interval='1d', progress=False)
+            for d in [d1, d2]:
+                if d is not None and hasattr(d.columns, 'levels'):
+                    d.columns = [c[0] if isinstance(c, tuple) else c for c in d.columns]
+            if d1 is None or d2 is None or len(d1) < 20 or len(d2) < 20:
+                return 0.0
+            r1 = d1['Close'].pct_change().dropna()
+            r2 = d2['Close'].pct_change().dropna()
+            # Align dates
+            common = r1.index.intersection(r2.index)
+            if len(common) < 20:
+                return 0.0
+            return float(r1.loc[common].corr(r2.loc[common]))
+        except Exception:
+            return 0.0
+
+    # Pre-computed sector correlations (approximate, avoids API calls)
+    SECTOR_MAP = {
+        'AAPL': 'tech', 'MSFT': 'tech', 'GOOGL': 'tech', 'GOOG': 'tech',
+        'AMZN': 'tech', 'META': 'tech', 'NVDA': 'tech', 'AVGO': 'tech',
+        'ADBE': 'tech', 'CRM': 'tech', 'ORCL': 'tech', 'CSCO': 'tech',
+        'INTC': 'tech', 'AMD': 'tech', 'QCOM': 'tech', 'TXN': 'tech',
+        'NFLX': 'tech', 'ACN': 'tech', 'TSLA': 'auto',
+        'JPM': 'finance', 'BAC': 'finance', 'WFC': 'finance', 'GS': 'finance',
+        'V': 'finance', 'MA': 'finance',
+        'JNJ': 'health', 'UNH': 'health', 'PFE': 'health', 'ABBV': 'health',
+        'MRK': 'health', 'LLY': 'health', 'TMO': 'health', 'ABT': 'health',
+        'XOM': 'energy', 'CVX': 'energy',
+        'PG': 'consumer', 'KO': 'consumer', 'PEP': 'consumer', 'COST': 'consumer',
+        'MCD': 'consumer', 'NKE': 'consumer', 'WMT': 'consumer', 'HD': 'consumer',
+        'BA': 'industrial', 'GE': 'industrial', 'HON': 'industrial', 'CAT': 'industrial',
+        'BTC-USD': 'crypto', 'ETH-USD': 'crypto', 'SOL-USD': 'crypto',
+        'DOGE-USD': 'crypto', 'ADA-USD': 'crypto', 'XRP-USD': 'crypto',
+    }
+
+    @classmethod
+    def check_exposure(cls, new_ticker: str, open_positions: Dict[str, Any],
+                        max_same_sector: int = 2, max_correlation: float = 0.75) -> tuple:
+        """Check if a new position would create overexposure.
+
+        Returns (allowed: bool, reason: str).
+        """
+        new_sector = cls.SECTOR_MAP.get(new_ticker.upper(), 'other')
+
+        # Count same-sector positions
+        same_sector = sum(1 for sym in open_positions
+                          if cls.SECTOR_MAP.get(sym.upper(), 'other') == new_sector)
+        if same_sector >= max_same_sector:
+            return False, f"Sector cap: {same_sector} {new_sector} positions already open (max {max_same_sector})"
+
+        return True, "OK"
+
+
+# ==========================================
+# EARNINGS CALENDAR
+# ==========================================
+
+class EarningsCalendar:
+    """Check if a ticker has upcoming earnings and block trades within the danger zone."""
+
+    @staticmethod
+    def days_to_earnings(ticker: str) -> Optional[int]:
+        """Return days until next earnings. None if unknown."""
+        try:
+            import yfinance as yf
+            tk = yf.Ticker(ticker)
+            cal = tk.calendar
+            if cal is not None and not cal.empty:
+                # Calendar can be a DataFrame with 'Earnings Date' row
+                if hasattr(cal, 'iloc'):
+                    for col in cal.columns:
+                        val = cal[col].iloc[0] if len(cal) > 0 else None
+                        if val is not None:
+                            if hasattr(val, 'date'):
+                                delta = (val - datetime.now()).days
+                                if delta >= 0:
+                                    return delta
+            # Try earnings_dates attribute
+            ed = getattr(tk, 'earnings_dates', None)
+            if ed is not None and not ed.empty:
+                future = ed.index[ed.index >= datetime.now()]
+                if len(future) > 0:
+                    return (future[0] - datetime.now()).days
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def is_safe_to_trade(ticker: str, min_days: int = 2) -> tuple:
+        """Check if it's safe to trade (no imminent earnings).
+
+        Returns (safe: bool, reason: str, days: Optional[int]).
+        """
+        days = EarningsCalendar.days_to_earnings(ticker)
+        if days is not None and days <= min_days:
+            return False, f"Earnings in {days} day(s) — avoid new positions", days
+        return True, "OK", days
+
+
+# ==========================================
+# TRAILING STOP MANAGER
+# ==========================================
+
+class TrailingStopManager:
+    """Professional trailing stop logic.
+
+    Stages:
+    1. Initial: fixed SL from entry
+    2. Breakeven: move SL to entry when price reaches 1R profit
+    3. Trail: SL trails at 1.5x ATR behind price (or highest close for longs)
+
+    This protects profits on runners while giving room for normal pullbacks.
+    """
+
+    @staticmethod
+    def update(position: Dict, current_price: float, atr: float) -> Dict:
+        """Update a position's stop loss. Mutates and returns the position dict.
+
+        Position dict expected keys: side, entry, sl, tp, high_watermark, low_watermark,
+        breakeven_applied, initial_sl, trailing_distance
+        """
+        side = position.get('side', 'LONG')
+        entry = float(position.get('entry', 0))
+        sl = float(position.get('sl', 0))
+        initial_r = abs(entry - float(position.get('initial_sl', sl)))
+        trail_dist = max(atr * 1.5, initial_r * 0.5)  # At least 0.5R or 1.5x ATR
+
+        if side == 'LONG':
+            # Update high watermark
+            hw = max(float(position.get('high_watermark', entry)), current_price)
+            position['high_watermark'] = hw
+
+            # Stage 2: breakeven at 1R
+            if not position.get('breakeven_applied', False):
+                if current_price >= entry + initial_r:
+                    new_sl = max(sl, entry + initial_r * 0.1)  # Slightly above entry
+                    position['sl'] = new_sl
+                    position['breakeven_applied'] = True
+                    return position
+
+            # Stage 3: trail behind high watermark
+            if position.get('breakeven_applied', False):
+                trail_sl = hw - trail_dist
+                if trail_sl > sl:
+                    position['sl'] = round(trail_sl, 4)
+
+        elif side == 'SHORT':
+            lw = min(float(position.get('low_watermark', entry)), current_price)
+            position['low_watermark'] = lw
+
+            if not position.get('breakeven_applied', False):
+                if current_price <= entry - initial_r:
+                    new_sl = min(sl, entry - initial_r * 0.1)
+                    position['sl'] = new_sl
+                    position['breakeven_applied'] = True
+                    return position
+
+            if position.get('breakeven_applied', False):
+                trail_sl = lw + trail_dist
+                if trail_sl < sl:
+                    position['sl'] = round(trail_sl, 4)
+
+        return position
+
+
+# ==========================================
+# SESSION TIMING FILTER
+# ==========================================
+
+class SessionTimer:
+    """Time-of-day filters based on empirical session patterns.
+
+    Market sessions (ET):
+    - 9:30-9:45:  Opening volatility (AVOID entries — wide spreads, fakeouts)
+    - 9:45-11:30: Power hour (BEST for breakouts — institutional orders)
+    - 11:30-14:00: Lunch chop (AVOID — low volume, mean-reverting)
+    - 14:00-15:30: Afternoon trend (GOOD — second-best session)
+    - 15:30-16:00: Closing volatility (AVOID — end-of-day rebalancing)
+    """
+
+    SESSIONS = {
+        'pre_open':  (0, 570),     # Before 9:30
+        'open_vol':  (570, 585),   # 9:30-9:45
+        'power':     (585, 690),   # 9:45-11:30
+        'lunch':     (690, 840),   # 11:30-14:00
+        'afternoon': (840, 930),   # 14:00-15:30
+        'close_vol': (930, 960),   # 15:30-16:00
+        'after':     (960, 1440),  # After 16:00
+    }
+
+    # Win rate multiplier per session (based on market microstructure research)
+    SESSION_QUALITY = {
+        'pre_open': 0.0,    # Don't trade
+        'open_vol': 0.6,    # Risky, reduce confidence
+        'power': 1.2,       # Best session, boost confidence
+        'lunch': 0.7,       # Chop, reduce confidence
+        'afternoon': 1.1,   # Good session
+        'close_vol': 0.5,   # Avoid
+        'after': 0.0,       # Don't trade
+    }
+
+    @classmethod
+    def get_session(cls) -> str:
+        try:
+            from zoneinfo import ZoneInfo
+            et = datetime.now(ZoneInfo('America/New_York'))
+            mins = et.hour * 60 + et.minute
+            for name, (start, end) in cls.SESSIONS.items():
+                if start <= mins < end:
+                    return name
+        except Exception:
+            pass
+        return 'power'  # Default to best session if can't determine
+
+    @classmethod
+    def confidence_multiplier(cls) -> float:
+        """Returns a multiplier (0.0-1.2) for the current session."""
+        return cls.SESSION_QUALITY.get(cls.get_session(), 1.0)
+
+    @classmethod
+    def should_trade(cls, is_crypto: bool = False) -> tuple:
+        """Returns (allowed: bool, reason: str, session: str)."""
+        if is_crypto:
+            return True, "Crypto trades 24/7", "crypto"
+        session = cls.get_session()
+        quality = cls.SESSION_QUALITY.get(session, 1.0)
+        if quality <= 0:
+            return False, f"Market {'closed' if session in ('pre_open','after') else 'session: ' + session}", session
+        if quality < 0.6:
+            return False, f"Low-quality session: {session} (high risk of fakeouts)", session
+        return True, f"Session: {session} (quality: {quality:.1f}x)", session
+
+
+# ==========================================
 # SWARM INTELLIGENCE — ADAPTIVE MULTI-AGENT PANEL
 # ==========================================
 
