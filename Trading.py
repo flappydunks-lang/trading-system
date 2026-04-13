@@ -24185,4 +24185,51 @@ def main():
         console.print("[dim]Check logs for details[/dim]")
 
 if __name__ == "__main__":
-    main()
+    if '--auto-scan' in sys.argv:
+        # Headless auto-trading mode (launched by scheduler)
+        print("[*] FinalAI Quantum — Auto-Scan Mode")
+        try:
+            app = FinalAIQuantum()
+            app.config = ConfigurationManager.load_config()
+            app.auto_trader.enabled = True
+            app.auto_trader.mode = app.config.get('auto_trade_mode', 'paper')
+            # Run a single deep scan cycle
+            tickers_key = app.config.get('auto_trade_universe', 'tech_leaders')
+            tickers = list(MARKET_UNIVERSES.get(tickers_key, ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN']))
+            min_conf = float(app.auto_trader.min_confidence)
+            rrr = float(app.config.get('default_rrr', 2.5))
+            print(f"[*] Scanning {len(tickers)} tickers (mode={app.auto_trader.mode}, min_conf={min_conf}%)")
+
+            for ticker in tickers:
+                try:
+                    df = DataManager.fetch_data(ticker, '5d', '1m')
+                    if df is None or df.empty:
+                        continue
+                    indicators = TechnicalAnalyzer.calculate_indicators(df)
+                    if indicators is None:
+                        continue
+                    indicators.price = float(df['Close'].iloc[-1])
+                    indicators.close = indicators.price
+
+                    signal = app.analyzer._fallback_analysis(
+                        ticker, indicators, float(app.config.get('account_size', 100000)),
+                        0.01, rrr, is_day_trading=True)
+                    if signal and signal.action in ('BUY', 'SELL') and signal.confidence >= min_conf:
+                        result = app.auto_trader.execute(
+                            ticker, signal.action, indicators.price,
+                            signal.stop_loss, signal.take_profit_1, signal.confidence,
+                            supporting=getattr(signal, 'supporting_signals', []))
+                        if result:
+                            print(f"  [TRADE] {signal.action} {ticker} @ ${indicators.price:.2f} ({signal.confidence:.0f}%)")
+                except Exception as e:
+                    print(f"  [ERROR] {ticker}: {e}")
+                    continue
+
+            # Update trailing stops on existing positions
+            app.auto_trader.update_trailing_stops(lambda t: DataManager.get_realtime_price(t))
+            print(f"[*] Scan complete. {app.auto_trader.daily_trades} trades today.")
+        except Exception as e:
+            print(f"[FATAL] {e}")
+            import traceback; traceback.print_exc()
+    else:
+        main()
