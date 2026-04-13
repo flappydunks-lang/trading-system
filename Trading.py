@@ -7906,7 +7906,8 @@ class AIAnalyzer:
             elif indicators.ema_8 < indicators.ema_21 < indicators.ema_34:
                 bearish_signals.append("EMA ribbon bearish (8<21<34)")
             # tight ribbon -> choppy/ranging market (AVOID TRADING)
-            ema_spread_pct = abs(indicators.ema_8 - indicators.ema_34) / max(1, indicators.price) * 100
+            ema_avg = (indicators.ema_8 + indicators.ema_34) / 2
+            ema_spread_pct = abs(indicators.ema_8 - indicators.ema_34) / max(1, ema_avg) * 100
             if ema_spread_pct < 0.5:  # EMAs within 0.5% = choppy — neutral, not bearish
                 neutral.append(f"Choppy market: EMA spread {ema_spread_pct:.2f}%")
         except Exception:
@@ -7987,7 +7988,6 @@ class AIAnalyzer:
                 # OBV rising while price flat/falling = hidden accumulation (bullish)
                 # OBV falling while price rising = distribution (bearish)
                 # Simple proxy: compare OBV direction to price direction
-                obv_series = indicators.closes.copy()  # approximate, real OBV uses cumulative volume
                 price_up = indicators.closes.iloc[-1] > indicators.closes.iloc[-10]
                 # Use volume-weighted approach as proxy
                 recent_up_vol = sum(indicators.volumes.iloc[i] for i in range(-10, 0)
@@ -8276,7 +8276,12 @@ class AIAnalyzer:
             _sl_mult = {'TRENDING': 1.0, 'RANGING': 1.5, 'VOLATILE': 1.8}.get(_regime, 1.2)
         else:
             _sl_mult = {'TRENDING': 1.5, 'RANGING': 2.5, 'VOLATILE': 3.0}.get(_regime, 2.0)
-        stop_loss = entry_price - indicators.atr * _sl_mult if action == "BUY" else entry_price + indicators.atr * _sl_mult
+        if action == "BUY":
+            stop_loss = entry_price - indicators.atr * _sl_mult
+        elif action == "SELL":
+            stop_loss = entry_price + indicators.atr * _sl_mult
+        else:  # HOLD — no meaningful SL/TP
+            stop_loss = entry_price
 
         # Add quant metrics to the CORRECT side based on their values
         try:
@@ -8294,13 +8299,17 @@ class AIAnalyzer:
         except Exception:
             pass
         
-        # Compute TP levels - optimize for short-term if day trading
+        # Compute TP levels - skip for HOLD
         risk_distance = abs(entry_price - stop_loss)
-        direction = 1 if action == "BUY" else -1
-        
-        # Regime-aware TP: trending markets can hold longer (higher R:R),
-        # ranging markets should take profit quicker (lower R:R).
-        if is_day_trading:
+        if action == "HOLD":
+            tp1 = tp2 = tp3 = entry_price
+            risk_distance = indicators.atr if indicators.atr else entry_price * 0.02
+        elif action == "BUY":
+            direction = 1
+        else:
+            direction = -1
+
+        if action in ("BUY", "SELL") and is_day_trading:
             _rrr = {'TRENDING': 3.0, 'RANGING': 1.8, 'VOLATILE': 2.2}.get(_regime, 2.5)
             tp1 = entry_price + direction * risk_distance * (_rrr * 0.6)   # Quick scalp
             tp2 = entry_price + direction * risk_distance * _rrr           # Standard
@@ -9816,15 +9825,17 @@ class SwarmIntelligence:
         sell_pct = sell_score / total * 100
         hold_pct = hold_score / total * 100
 
-        if buy_pct > sell_pct and buy_pct > hold_pct and buy_pct > 40:
-            return {'action': 'BUY', 'confidence': buy_pct, 'reasons': buy_reasons,
-                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
-        elif sell_pct > buy_pct and sell_pct > hold_pct and sell_pct > 40:
-            return {'action': 'SELL', 'confidence': sell_pct, 'reasons': sell_reasons,
-                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
+        # Plurality wins if it leads by 10+ points. Otherwise HOLD.
+        bd = {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}
+        max_pct = max(buy_pct, sell_pct, hold_pct)
+        margin = max_pct - sorted([buy_pct, sell_pct, hold_pct])[-2]  # lead over 2nd place
+
+        if buy_pct == max_pct and margin >= 10:
+            return {'action': 'BUY', 'confidence': buy_pct, 'reasons': buy_reasons, 'breakdown': bd}
+        elif sell_pct == max_pct and margin >= 10:
+            return {'action': 'SELL', 'confidence': sell_pct, 'reasons': sell_reasons, 'breakdown': bd}
         else:
-            return {'action': 'HOLD', 'confidence': hold_pct, 'reasons': ['No clear consensus'],
-                    'breakdown': {'buy': buy_pct, 'sell': sell_pct, 'hold': hold_pct}}
+            return {'action': 'HOLD', 'confidence': hold_pct, 'reasons': ['No clear consensus (margin < 10%)'], 'breakdown': bd}
 
     def print_leaderboard(self):
         """Show agent performance ranking."""
@@ -10250,6 +10261,11 @@ class AutoTrader:
         if action == "SHORT" and is_crypto: return None
 
         # ── INSTITUTIONAL GATES (automatic, run every trade) ──
+
+        # 0. Position limit check
+        if len(self.open_positions) >= self.max_open_positions:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): max positions ({self.max_open_positions})[/yellow]")
+            return None
 
         # 1. Session timing: block entries during low-quality sessions
         session_ok, session_reason, session_name = SessionTimer.should_trade(is_crypto)
