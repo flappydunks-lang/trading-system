@@ -8319,12 +8319,14 @@ class AIAnalyzer:
         else:
             direction = -1
 
-        if action in ("BUY", "SELL") and is_day_trading:
+        if action == "HOLD":
+            pass  # tp1/tp2/tp3 already set to entry_price above
+        elif is_day_trading:
             _rrr = {'TRENDING': 3.0, 'RANGING': 1.8, 'VOLATILE': 2.2}.get(_regime, 2.5)
-            tp1 = entry_price + direction * risk_distance * (_rrr * 0.6)   # Quick scalp
-            tp2 = entry_price + direction * risk_distance * _rrr           # Standard
-            tp3 = entry_price + direction * risk_distance * (_rrr * 1.4)   # Runner
-        elif desired_rrr and risk_distance > 0 and action in ("BUY", "SELL"):
+            tp1 = entry_price + direction * risk_distance * (_rrr * 0.6)
+            tp2 = entry_price + direction * risk_distance * _rrr
+            tp3 = entry_price + direction * risk_distance * (_rrr * 1.4)
+        elif desired_rrr and risk_distance > 0:
             tp1 = entry_price + direction * (risk_distance * desired_rrr)
             tp2 = entry_price + direction * (risk_distance * desired_rrr * 1.5)
             tp3 = entry_price + direction * (risk_distance * desired_rrr * 2)
