@@ -1197,14 +1197,14 @@ class PaperTradingManager:
                         continue
                     
                     # Check stop loss and take profit
-                    if trade.action == "LONG":
+                    if trade.action in ("LONG", "BUY"):
                         if current_price <= trade.stop_loss:
                             self._close_trade(trade, current_price, "CLOSED_STOP", "Stop loss hit")
                             updated = True
                         elif current_price >= trade.take_profit:
                             self._close_trade(trade, current_price, "CLOSED_PROFIT", "Take profit hit")
                             updated = True
-                    else:  # SHORT
+                    elif trade.action in ("SHORT", "SELL"):
                         if current_price >= trade.stop_loss:
                             self._close_trade(trade, current_price, "CLOSED_STOP", "Stop loss hit")
                             updated = True
@@ -1226,10 +1226,10 @@ class PaperTradingManager:
         trade.status = status
         trade.reason = reason
         
-        if trade.action == "LONG":
+        if trade.action in ("LONG", "BUY"):
             trade.pnl = (exit_price - trade.entry_price) * trade.position_size
             trade.pnl_pct = ((exit_price - trade.entry_price) / trade.entry_price) * 100
-        else:  # SHORT
+        else:  # SHORT / SELL
             trade.pnl = (trade.entry_price - exit_price) * trade.position_size
             trade.pnl_pct = ((trade.entry_price - exit_price) / trade.entry_price) * 100
         
@@ -5210,7 +5210,9 @@ class StatisticalArbitrage:
             from scipy.stats import linregress
             slope, intercept, _, _, _ = linregress(s2, s1)
             
-            is_cointegrated = p_value < 0.05
+            # Bonferroni-corrected threshold: 0.05 / n_tests (set by caller, default conservative)
+            _alpha = getattr(FactorModels, '_coint_alpha', 0.01)  # Conservative default
+            is_cointegrated = p_value < _alpha
             return is_cointegrated, float(p_value), float(slope)
         
         except Exception as e:
@@ -5252,7 +5254,11 @@ class StatisticalArbitrage:
             return []
 
         pairs = []
-        significance_level = 0.05  # Use fixed significance level
+        # Bonferroni correction: 0.05 / number_of_tests
+        n_tickers = len(tickers)
+        n_tests = max(1, n_tickers * (n_tickers - 1) // 2)
+        significance_level = 0.05 / n_tests
+        FactorModels._coint_alpha = significance_level  # Pass to test_cointegration
         
         # Fetch data for all tickers
         data = {}
@@ -5481,6 +5487,14 @@ class MeanReversionStrategy(BaseStrategy):
                 if df is None or len(df) < self.bb_period + 5:
                     continue
                 z_score, is_reverting = FactorModels.detect_mean_reversion(df, window=self.bb_period)
+                # ADX filter: only signal mean reversion when NOT trending (ADX < 25)
+                try:
+                    _adx_series = df['Close'].diff().abs().ewm(alpha=1/14).mean()
+                    _adx_approx = float(_adx_series.iloc[-1] / df['Close'].iloc[-1] * 10000) if df['Close'].iloc[-1] > 0 else 0
+                    if _adx_approx > 25:
+                        continue  # Strong trend — not a mean reversion environment
+                except Exception:
+                    pass
                 if is_reverting and abs(z_score) >= self.z_threshold:
                     current_price = float(df['Close'].iloc[-1])
                     atr = TechnicalAnalyzer.calculate_atr(df.tail(lookback_days), 14)
@@ -6612,7 +6626,7 @@ class TechnicalAnalyzer:
 
             # Keltner Channels (EMA 20, ATR multiplier 2)
             kc_mid = close.ewm(span=20, adjust=False).mean()
-            kc_atr = tr.ewm(alpha=1/10, min_periods=10, adjust=False).mean()
+            kc_atr = tr.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
             keltner_upper = float((kc_mid + 2 * kc_atr).iloc[-1])
             keltner_lower = float((kc_mid - 2 * kc_atr).iloc[-1])
             keltner_middle = float(kc_mid.iloc[-1])
@@ -6628,7 +6642,7 @@ class TechnicalAnalyzer:
 
             senkou_a = float((((tenkan_sen + kijun_sen)/2)).__float__()) if True else float(((nine_period_high + nine_period_low)/2).iloc[-1])
             senkou_b = float((((high.rolling(min(52, len(high))).max() + low.rolling(min(52, len(low))).min())/2).iloc[-1]))
-            chikou_span = float(close.shift(26).iloc[-1]) if len(close) > 26 else float(close.iloc[-1])
+            chikou_span = float(close.shift(-26).iloc[-27]) if len(close) > 26 else float(close.iloc[-1])
 
             # HMA 20 (Hull Moving Average) - proper WMA calculation
             def wma(series, period):
@@ -7077,7 +7091,7 @@ class AIAnalyzer:
             # Use robust JSON extraction instead of greedy regex
             analysis = extract_json_from_text(analysis_text)
             if analysis:
-                return self._create_trade_summary(ticker, indicators, analysis, account_size, risk_per_trade_pct, desired_rrr)
+                return self._create_trade_summary(ticker, indicators, analysis, account_size, risk_per_trade_pct, desired_rrr, patterns=patterns, market_structure=market_structure)
             else:
                 logger.error("Failed to parse AI response")
                 return self._fallback_analysis(ticker, indicators, account_size, risk_per_trade_pct, desired_rrr)
@@ -7456,18 +7470,23 @@ class AIAnalyzer:
     def _create_trade_summary(self, ticker: str, indicators: AdvancedIndicators,
                              analysis: Dict, account_size: float,
                              risk_per_trade_pct: float = 0.02,
-                             desired_rrr: Optional[float] = None) -> TradeSummary:
+                             desired_rrr: Optional[float] = None,
+                             patterns=None, market_structure=None) -> TradeSummary:
         """Create trade summary from AI analysis."""
         
         entry_price = indicators.price
-        # Ensure default stop loss respects direction (BUY below entry, SELL above entry)
         action_dir = analysis.get('action', 'BUY')
         default_stop = entry_price - indicators.atr * 2 if action_dir == 'BUY' else entry_price + indicators.atr * 2
         stop_loss = analysis.get('stop_loss_price', default_stop)
 
-        # Compute take-profit levels.
-        # Priority: if user provided desired_rrr -> compute from desired_rrr (override AI TPs).
-        # Else if AI provided TP levels use them, otherwise fallback to ATR multiples.
+        # Validate AI stop-loss direction — reject if on wrong side
+        if action_dir == 'BUY' and stop_loss >= entry_price:
+            logger.warning(f"AI SL above entry for BUY {ticker} — using ATR default")
+            stop_loss = entry_price - indicators.atr * 2
+        elif action_dir == 'SELL' and stop_loss <= entry_price:
+            logger.warning(f"AI SL below entry for SELL {ticker} — using ATR default")
+            stop_loss = entry_price + indicators.atr * 2
+
         risk_distance = abs(entry_price - stop_loss)
         direction = 1 if action_dir == 'BUY' else -1
 
@@ -7479,20 +7498,43 @@ class AIAnalyzer:
         else:
             tp_levels = analysis.get('take_profit_levels', None)
             if not tp_levels:
-                # fallback to ATR multiples
+                _rrr_default = desired_rrr or 2.0
                 tp_levels = [
-                    entry_price + direction * indicators.atr * 2,
-                    entry_price + direction * indicators.atr * 4,
-                    entry_price + direction * indicators.atr * 6
+                    entry_price + direction * risk_distance * _rrr_default,
+                    entry_price + direction * risk_distance * _rrr_default * 1.5,
+                    entry_price + direction * risk_distance * _rrr_default * 2,
                 ]
-        
+            # Validate AI TPs — reject any on wrong side of entry
+            validated_tps = []
+            for tp in tp_levels:
+                if action_dir == 'BUY' and tp > entry_price:
+                    validated_tps.append(tp)
+                elif action_dir == 'SELL' and tp < entry_price:
+                    validated_tps.append(tp)
+            if len(validated_tps) < 3:
+                _rrr_default = desired_rrr or 2.0
+                validated_tps = [
+                    entry_price + direction * risk_distance * _rrr_default,
+                    entry_price + direction * risk_distance * _rrr_default * 1.5,
+                    entry_price + direction * risk_distance * _rrr_default * 2,
+                ]
+            tp_levels = validated_tps[:3]
+
         position_size = analysis.get('position_size_shares', 0)
         if position_size == 0:
             risk_per_trade = account_size * (risk_per_trade_pct if risk_per_trade_pct is not None else 0.02)
             risk_per_share = abs(entry_price - stop_loss)
+            # Enforce minimum risk_per_share of 0.5% of entry to prevent huge positions
+            min_risk = entry_price * 0.005
+            risk_per_share = max(risk_per_share, min_risk)
             position_size = int(risk_per_trade / risk_per_share) if risk_per_share > 0 else 0
+            # Cap notional at 10% of account
+            max_notional = account_size * 0.10
+            max_shares = int(max_notional / entry_price) if entry_price > 0 else 0
+            position_size = min(position_size, max_shares)
         else:
             risk_per_share = abs(entry_price - stop_loss)
+            risk_per_share = max(risk_per_share, entry_price * 0.005)
         
         # Display reward based on user's desired R:R if set; else use TP2 for ~1:2 default
         if desired_rrr and risk_per_share > 0:
@@ -7550,22 +7592,17 @@ class AIAnalyzer:
         # IMPROVEMENT: Calculate comprehensive quantitative confidence from ALL indicators
         action_dir = analysis.get('action', 'HOLD')
         try:
-            # patterns and market_structure may not be available — use defaults
-            _patterns = getattr(self, '_last_patterns', None)
-            _mkt_struct = getattr(self, '_last_market_structure', None)
-            if _patterns is None:
-                _patterns = type('P', (), {'bullish_patterns': [], 'bearish_patterns': [], 'neutral_patterns': []})()
-            if _mkt_struct is None:
-                _mkt_struct = type('M', (), {'trend': 'RANGING', 'structure': 'RANGING', 'confidence': 50})()
+            # Use real patterns/market_structure if passed, else safe defaults
+            _patterns = patterns if patterns is not None else type('P', (), {'bullish_patterns': [], 'bearish_patterns': [], 'neutral_patterns': []})()
+            _mkt_struct = market_structure if market_structure is not None else type('M', (), {'trend': 'RANGING', 'structure': 'RANGING', 'confidence': 50})()
             comprehensive_confidence = self._calculate_comprehensive_confidence(
                 ticker, indicators, _patterns, _mkt_struct, analysis, action_dir
             )
         except Exception:
-            comprehensive_confidence = ai_confidence  # Fall back to AI-only
-        
-        # Blend AI confidence (50%) with comprehensive quantitative confidence (50%)
-        # This ensures we use ALL data while respecting AI insights
-        final_confidence = (ai_confidence * 0.5) + (comprehensive_confidence * 0.5)
+            comprehensive_confidence = ai_confidence
+
+        # Blend: 40% AI / 60% quantitative (quant is deterministic and more reliable)
+        final_confidence = (ai_confidence * 0.4) + (comprehensive_confidence * 0.6)
         final_confidence = min(95.0, max(0.0, final_confidence))
 
         return TradeSummary(
@@ -8130,7 +8167,6 @@ class AIAnalyzer:
         # Overbought + bearish pattern = confluence (one extra signal, not a pile)
         if extreme_overbought and pattern_signals:
             bearish_signals.append("Overbought + pattern confluence")
-            console.print(f"\n[bold][red]⚠ï¸ EXTREME SETUP: {len(pattern_signals)} bearish pattern(s) + extreme overbought![/red][/bold]")
         
         # ===== CRITICAL: Trend & Momentum Filters =====
         # Check if price is in strong trend (prevent counter-trend disasters)
@@ -8283,7 +8319,7 @@ class AIAnalyzer:
         # Volatile = widest (survive the swings).
         _regime = indicators.market_regime if indicators.market_regime else 'VOLATILE'
         if is_day_trading:
-            _sl_mult = {'TRENDING': 1.0, 'RANGING': 1.5, 'VOLATILE': 1.8}.get(_regime, 1.2)
+            _sl_mult = {'TRENDING': 1.3, 'RANGING': 1.8, 'VOLATILE': 2.2}.get(_regime, 1.5)
         else:
             _sl_mult = {'TRENDING': 1.5, 'RANGING': 2.5, 'VOLATILE': 3.0}.get(_regime, 2.0)
         if action == "BUY":
@@ -15305,7 +15341,8 @@ List:"""
                         indicators = calculate_indicators(df_for_bot) if df_for_bot is not None else None
                         if indicators is not None:
                             account_size = float((self.config or {}).get('account_size', 10000.0))
-                            risk_per_trade = float((self.config or {}).get('risk_per_trade', 2.0)) / 100.0
+                            _rpt_raw = float((self.config or {}).get('risk_per_trade', 2.0))
+                            risk_per_trade = _rpt_raw / 100.0 if _rpt_raw > 1 else _rpt_raw
                             desired_rrr = float((self.config or {}).get('default_rrr', 2.0))
                             trade_summary = self.analyzer._fallback_analysis(
                                 mentioned_ticker,
@@ -16886,7 +16923,7 @@ List:"""
                 trade_summary = self.analyzer.analyze(
                 ticker, indicators, patterns, market_structure,
                 volume_profile, self.config['account_size'],
-                risk_per_trade_pct=(self.config.get('risk_per_trade', 2.0)/100.0),
+                risk_per_trade_pct=(self.config.get('risk_per_trade', 2.0)/100.0 if self.config.get('risk_per_trade', 2.0) > 1 else self.config.get('risk_per_trade', 0.02)),
                 desired_rrr=float(desired_rrr) if desired_rrr is not None else None,
                 analysis_options=analysis_options
             )
@@ -22333,7 +22370,10 @@ class BacktestEngine:
                     # position size based on risk_per_trade
                     risk_amount = equity * risk_per_trade
                     stop_distance = next_open - stop_loss
-                    shares = int(risk_amount / (stop_distance * next_open)) if stop_distance > 0 else 0
+                    shares = int(risk_amount / stop_distance) if stop_distance > 0 else 0
+                    # Cap at 10% of account notional
+                    max_shares = int(equity * 0.10 / max(1, next_open))
+                    shares = min(shares, max(1, max_shares))
                     if shares > 0:
                         # Apply slippage to entry (pay more when buying)
                         entry_with_slippage = next_open * (1 + self.slippage_pct)
