@@ -7278,30 +7278,30 @@ class AIAnalyzer:
                     momentum_score += 50
                 momentum_count += 1
             
-            # Stochastic
+            # Stochastic — BUY: oversold (K<20) = high score; SELL: overbought (K>80) = high score
             if indicators.stochastic_k is not None and indicators.stochastic_d is not None:
                 if action == 'BUY':
-                    stoch_score = min(100, (indicators.stochastic_k - 20) * 0.8) if indicators.stochastic_k < 80 else 100
+                    stoch_score = max(0, min(100, (80 - indicators.stochastic_k) * 1.25))  # K=20→75, K=80→0
                 else:
-                    stoch_score = min(100, (80 - indicators.stochastic_k) * 0.8) if indicators.stochastic_k > 20 else 100
+                    stoch_score = max(0, min(100, (indicators.stochastic_k - 20) * 1.25))  # K=80→75, K=20→0
                 momentum_score += stoch_score
                 momentum_count += 1
-            
-            # Williams %R
+
+            # Williams %R — already correct (verified in audit)
             if indicators.williams_r:
                 if action == 'BUY':
-                    wr_score = min(100, (-20 - indicators.williams_r) * 2)  # -100 to -20 range
+                    wr_score = min(100, (-20 - indicators.williams_r) * 2)  # WR=-80→120→100, WR=-20→0
                 else:
-                    wr_score = min(100, (indicators.williams_r + 80) * 2)   # -80 to 0 range
+                    wr_score = min(100, (indicators.williams_r + 80) * 2)   # WR=-20→120→100, WR=-80→0
                 momentum_score += max(0, min(100, wr_score))
                 momentum_count += 1
-            
-            # MFI
+
+            # MFI — BUY: oversold (MFI<20) = high score; SELL: overbought (MFI>80) = high score
             if indicators.mfi:
                 if action == 'BUY':
-                    mfi_score = min(100, (indicators.mfi - 20) * 1.25)  # 20-80 -> 0-75
+                    mfi_score = max(0, min(100, (80 - indicators.mfi) * 1.25))  # MFI=20→75, MFI=80→0
                 else:
-                    mfi_score = min(100, (80 - indicators.mfi) * 1.25)
+                    mfi_score = max(0, min(100, (indicators.mfi - 20) * 1.25))  # MFI=80→75, MFI=20→0
                 momentum_score += max(0, min(100, mfi_score))
                 momentum_count += 1
             
