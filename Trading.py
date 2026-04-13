@@ -7724,7 +7724,7 @@ class AIAnalyzer:
         try:
             # 4. VWAP DEVIATION (Volume-Weighted Average Price)
             if hasattr(indicators, 'closes') and hasattr(indicators, 'volumes') and len(indicators.closes) >= 20:
-                typical_price = (indicators.closes.iloc[-20:] + indicators.closes.iloc[-20:]) / 2
+                typical_price = indicators.closes.iloc[-20:]  # Use close as proxy (no High/Low series available here)
                 vwap = (typical_price * indicators.volumes.iloc[-20:]).sum() / indicators.volumes.iloc[-20:].sum()
                 
                 vwap_dev = ((indicators.price - vwap) / vwap) * 100
@@ -7852,17 +7852,24 @@ class AIAnalyzer:
         else:
             bearish_signals.append("Price < SMA200")
 
-        # RSI extremes — single count each
+        # RSI — single signal. Extreme handled below, don't double-count.
         if indicators.rsi_14 < 30:
-            bullish_signals.append(f"RSI(14) oversold ({indicators.rsi_14})")
+            bullish_signals.append(f"RSI oversold ({indicators.rsi_14:.0f})")
         elif indicators.rsi_14 > 70:
-            bearish_signals.append(f"RSI(14) overbought ({indicators.rsi_14})")
+            bearish_signals.append(f"RSI overbought ({indicators.rsi_14:.0f})")
+        elif 45 <= indicators.rsi_14 <= 55:
+            neutral.append(f"RSI neutral ({indicators.rsi_14:.0f})")
 
-        # MACD
-        if indicators.macd > indicators.macd_signal:
-            bullish_signals.append("MACD > Signal")
-        else:
-            bearish_signals.append("MACD < Signal")
+        # MACD — only signal when histogram is meaningfully separated
+        try:
+            macd_hist = abs(indicators.macd - indicators.macd_signal)
+            macd_threshold = indicators.price * 0.0005  # 0.05% of price
+            if indicators.macd > indicators.macd_signal and macd_hist > macd_threshold:
+                bullish_signals.append("MACD > Signal (strong)")
+            elif indicators.macd < indicators.macd_signal and macd_hist > macd_threshold:
+                bearish_signals.append("MACD < Signal (strong)")
+        except Exception:
+            pass
 
         # ADX strength
         # ADX — strong trend is neutral (confirms existing direction), don't penalize weak
@@ -7884,13 +7891,11 @@ class AIAnalyzer:
         try:
             if hasattr(indicators, 'closes') and indicators.closes is not None:
                 if self._detect_double_top(indicators.closes):
-                    pattern_signals.append("🔴 Double Top pattern detected (STRONG bearish)")
+                    pattern_signals.append("Double Top detected")
                     bearish_signals.append("PATTERN: Double Top")
-                    bearish_signals.append("PATTERN: Double Top")  # Extra weight
                 if self._detect_double_bottom(indicators.closes):
-                    pattern_signals.append("🟢 Double Bottom pattern detected (STRONG bullish)")
+                    pattern_signals.append("Double Bottom detected")
                     bullish_signals.append("PATTERN: Double Bottom")
-                    bullish_signals.append("PATTERN: Double Bottom")  # Extra weight
         except Exception as e:
             pass
 
@@ -7902,9 +7907,8 @@ class AIAnalyzer:
                 bearish_signals.append("EMA ribbon bearish (8<21<34)")
             # tight ribbon -> choppy/ranging market (AVOID TRADING)
             ema_spread_pct = abs(indicators.ema_8 - indicators.ema_34) / max(1, indicators.price) * 100
-            if ema_spread_pct < 0.5:  # EMAs within 0.5% = choppy
-                bearish_signals.append(f"⚠ CHOPPY MARKET: EMA spread only {ema_spread_pct:.2f}%")
-                bearish_signals.append("⚠ Low probability setup (ranging)")
+            if ema_spread_pct < 0.5:  # EMAs within 0.5% = choppy — neutral, not bearish
+                neutral.append(f"Choppy market: EMA spread {ema_spread_pct:.2f}%")
         except Exception:
             pass
 
@@ -7938,7 +7942,7 @@ class AIAnalyzer:
         # HMA slope and ROC
         try:
             if abs(indicators.hma_20 - indicators.ema_21) / max(1, indicators.price) < 0.01:
-                bullish_signals.append("HMA aligned with EMA21 (trend confirmation)")
+                neutral.append("HMA aligned with EMA21")
             if abs(indicators.roc_12) > 10:
                 # large ROC magnitude indicates rapid movement
                 neutral.append(f"High ROC(12) magnitude ({indicators.roc_12}%)")
@@ -7949,29 +7953,18 @@ class AIAnalyzer:
         extreme_overbought = False
         extreme_oversold = False
         
+        # Extreme RSI — only fires if RSI > 72 or < 28 (more extreme than 70/30 above).
+        # Does NOT add a new signal — just sets flags for confidence adjustment later.
         if indicators.rsi_14 > 72:
             extreme_overbought = True
-            bearish_signals.append(f"RSI extreme overbought ({indicators.rsi_14})")
-            if indicators.williams_r and indicators.williams_r > -10:
-                bearish_signals.append("Williams %R confirms overbought")
-
         if indicators.rsi_14 < 28:
             extreme_oversold = True
-            bullish_signals.append(f"RSI extreme oversold ({indicators.rsi_14})")
-            if indicators.williams_r and indicators.williams_r < -90:
-                bullish_signals.append("Williams %R confirms oversold")
-        
-        # If overbought + pattern detected = VERY HIGH confidence SELL
+
+        # Overbought + bearish pattern = confluence (one extra signal, not a pile)
         if extreme_overbought and pattern_signals:
-            bearish_signals.extend(pattern_signals * 3)  # Triple weight pattern when overbought
+            bearish_signals.append("Overbought + pattern confluence")
             console.print(f"\n[bold][red]⚠ï¸ EXTREME SETUP: {len(pattern_signals)} bearish pattern(s) + extreme overbought![/red][/bold]")
         
-        # Even without pattern, overbought alone should be strong
-        if extreme_overbought and not pattern_signals:
-            # Add penalty signals for being at highs
-            bearish_signals.append("Price at extremes with high RSI")
-            bearish_signals.append("Reversal risk elevated")
-
         # ===== CRITICAL: Trend & Momentum Filters =====
         # Check if price is in strong trend (prevent counter-trend disasters)
         price_above_sma20 = indicators.price > indicators.sma_20 if indicators.sma_20 else None
@@ -8046,7 +8039,7 @@ class AIAnalyzer:
                 # Conservative estimate: use 60% of average swing
                 target_move_pct = avg_swing_pct * 0.6 / 100
                 
-                bullish_signals.append(f"Day-trade analysis: {avg_swing_pct:.2f}% avg 5-20min swing")
+                neutral.append(f"Day-trade analysis: {avg_swing_pct:.2f}% avg 5-20min swing")
             except Exception:
                 # Fallback to ATR-based estimation
                 target_move_pct = (indicators.atr / entry_price) * 0.7
