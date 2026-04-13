@@ -10177,12 +10177,48 @@ class AutoTrader:
             self._save_state()
 
     def record_open(self, ticker, pos_data):
+        # Ensure trailing stop fields exist
+        pos_data.setdefault('high_watermark', float(pos_data.get('entry', 0)))
+        pos_data.setdefault('low_watermark', float(pos_data.get('entry', 0)))
+        pos_data.setdefault('breakeven_applied', False)
+        pos_data.setdefault('initial_sl', pos_data.get('sl'))
         self.open_positions[ticker] = pos_data
         self._save_state()
 
-    def record_close(self, ticker):
+    def record_close(self, ticker, was_profitable: bool = None):
+        """Close a position and update signal calibrator if outcome known."""
+        pos = self.open_positions.get(ticker)
+        if pos and was_profitable is not None:
+            try:
+                signals = pos.get('signals_fired', [])
+                direction = pos.get('side', 'LONG')
+                action = 'BUY' if direction == 'LONG' else 'SELL'
+                _signal_calibrator.record_outcome(signals, action, was_profitable)
+            except Exception:
+                pass
         self.open_positions.pop(ticker, None)
         self._save_state()
+
+    def update_trailing_stops(self, price_fn):
+        """Update trailing stops on all open positions. Call each scan cycle.
+
+        Args:
+            price_fn: callable(ticker) -> float, returns current price
+        """
+        for ticker, pos in list(self.open_positions.items()):
+            try:
+                price = price_fn(ticker)
+                if price is None or price <= 0:
+                    continue
+                atr = float(pos.get('atr', abs(float(pos.get('entry', 1)) * 0.015)))
+                old_sl = float(pos.get('sl', 0))
+                TrailingStopManager.update(pos, price, atr)
+                new_sl = float(pos.get('sl', 0))
+                if new_sl != old_sl:
+                    self._save_state()
+                    console.print(f"[cyan]  Trailing stop {ticker}: ${old_sl:.2f} -> ${new_sl:.2f}[/cyan]")
+            except Exception:
+                continue
 
     def record_pnl(self, pct):
         self.daily_pnl_pct += pct
@@ -10212,6 +10248,35 @@ class AutoTrader:
         is_crypto = BrokerInterface.is_crypto_symbol(ticker)
         if action == "SHORT" and not self.allow_shorts: return None
         if action == "SHORT" and is_crypto: return None
+
+        # ── INSTITUTIONAL GATES (automatic, run every trade) ──
+
+        # 1. Session timing: block entries during low-quality sessions
+        session_ok, session_reason, session_name = SessionTimer.should_trade(is_crypto)
+        if not session_ok:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): {session_reason}[/yellow]")
+            return None
+        # Apply session confidence multiplier
+        session_mult = SessionTimer.confidence_multiplier()
+        confidence = confidence * session_mult
+
+        # 2. Earnings calendar: block entries near earnings
+        earn_ok, earn_reason, earn_days = EarningsCalendar.is_safe_to_trade(ticker, min_days=2)
+        if not earn_ok:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): {earn_reason}[/yellow]")
+            return None
+
+        # 3. Correlation filter: block overexposure to same sector
+        corr_ok, corr_reason = CorrelationFilter.check_exposure(
+            ticker, self.open_positions, max_same_sector=2)
+        if not corr_ok:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): {corr_reason}[/yellow]")
+            return None
+
+        # Re-check confidence after session multiplier
+        if confidence < self.min_confidence:
+            console.print(f"[yellow]AutoTrader skipped ({ticker}): confidence {confidence:.0f}% after session adjustment[/yellow]")
+            return None
 
         account = float((self.bot.config or {}).get('account_size', 100000))
         entry_f, sl_f, tp_f = float(entry), float(stop_loss), float(take_profit)
@@ -10313,7 +10378,10 @@ class AutoTrader:
 
         result = {'entry_price': entry_f, 'stop_loss': sl_f, 'take_profit': tp_f,
                   'position_side': action, 'position_size': position_size,
-                  'channel': channel, 'broker_order_id': broker_order_id, 'is_crypto': is_crypto}
+                  'channel': channel, 'broker_order_id': broker_order_id, 'is_crypto': is_crypto,
+                  'signals_fired': kwargs.get('supporting', []) or [],
+                  'atr': abs(entry_f - sl_f) / 1.2,  # Approximate ATR from SL distance
+                  'session': SessionTimer.get_session()}
 
         # Telegram notification
         try:
