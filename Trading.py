@@ -17947,195 +17947,190 @@ Rules:
         Prompt.ask("Press Enter to continue")
     
     def run_backtest(self):
-        """Backtest using TA signals, Swarm consensus, or Quant strategies on historical data."""
+        """Blind prediction test: bot analyzes historical candles up to a cutoff,
+        makes its prediction, then reveals what actually happened so you can
+        score accuracy."""
         DisplayManager.show_header()
-        console.print("[bold cyan]📊 STRATEGY BACKTESTER[/bold cyan]\n")
+        console.print("[bold cyan]📊 BLIND PREDICTION TEST[/bold cyan]\n")
+        console.print("[dim]The bot sees ONLY candles up to your cutoff date.[/dim]")
+        console.print("[dim]It makes a BUY/SELL/HOLD call, then you reveal the future to check.[/dim]\n")
 
         ticker = Prompt.ask("Ticker", default="AAPL").upper().strip()
-        period = Prompt.ask("Period", choices=["1mo", "3mo", "6mo", "1y", "2y"], default="3mo")
-        method = Prompt.ask("Method", choices=["ta", "swarm", "both"], default="ta")
-        capital = float(Prompt.ask("Starting capital ($)", default="100000"))
-        risk_pct = float(Prompt.ask("Risk per trade (%)", default="1.0")) / 100.0
+        method = Prompt.ask("Method", choices=["ta", "swarm"], default="ta")
 
-        console.print(f"\n[cyan]Backtesting {ticker} over {period} using {method.upper()}...[/cyan]\n")
+        console.print("\n[bold]Choose your analysis window:[/bold]")
+        console.print("[dim]The bot will ONLY see candles inside this window — nothing after.[/dim]")
+        start_date = Prompt.ask("Start date (YYYY-MM-DD)", default=(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'))
+        cutoff_date = Prompt.ask("Cutoff date (bot's last candle)", default=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'))
+
+        console.print(f"\n[cyan]Fetching {ticker} from {start_date} to {cutoff_date}...[/cyan]")
 
         try:
-            df = yf.download(ticker, period=period, interval='1d', progress=False)
-            if df is None or df.empty or len(df) < 30:
-                console.print("[red]Not enough data[/red]")
+            # STEP 1: Fetch ONLY the analysis window (bot sees this)
+            df = yf.download(ticker, start=start_date, end=cutoff_date, interval='1d', progress=False)
+            if df is None or df.empty or len(df) < 20:
+                console.print("[red]Not enough data in that window (need 20+ bars)[/red]")
                 Prompt.ask("\nPress Enter to return")
                 return
-
-            # Flatten MultiIndex columns if present
             if hasattr(df.columns, 'levels'):
                 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
-            trades = []
-            equity = capital
-            peak_equity = capital
-            max_dd = 0.0
-            position = None
-            lookback = 50  # Need 50 bars for indicators
+            last_price = float(df['Close'].iloc[-1])
+            last_date = df.index[-1]
+            console.print(f"\n[bold]Bot sees {len(df)} candles: {df.index[0].strftime('%Y-%m-%d')} → {last_date.strftime('%Y-%m-%d')}[/bold]")
+            console.print(f"[bold]Last price bot sees: ${last_price:.2f}[/bold]\n")
 
-            for i in range(lookback, len(df) - 1):
-                window = df.iloc[i - lookback:i + 1].copy()
-                current_price = float(window['Close'].iloc[-1])
-                next_open = float(df['Open'].iloc[i + 1])
-                next_high = float(df['High'].iloc[i + 1])
-                next_low = float(df['Low'].iloc[i + 1])
-                next_close = float(df['Close'].iloc[i + 1])
+            # STEP 2: Run analysis on ONLY the visible candles
+            indicators = TechnicalAnalyzer.calculate_indicators(df)
+            if indicators is None:
+                console.print("[red]Could not compute indicators[/red]")
+                Prompt.ask("\nPress Enter to return")
+                return
+            indicators.price = last_price
+            indicators.close = last_price
 
-                # Check existing position SL/TP
-                if position is not None:
-                    hit_sl = (position['direction'] == 'BUY' and next_low <= position['sl']) or \
-                             (position['direction'] == 'SELL' and next_high >= position['sl'])
-                    hit_tp = (position['direction'] == 'BUY' and next_high >= position['tp']) or \
-                             (position['direction'] == 'SELL' and next_low <= position['tp'])
+            if method == 'ta':
+                console.print("[bold cyan]Running Technical Analysis...[/bold cyan]\n")
+                signal = self.analyzer._fallback_analysis(
+                    ticker, indicators, 100000.0, 0.01, desired_rrr=2.5, is_day_trading=False)
+                if signal is None:
+                    console.print("[yellow]No signal generated[/yellow]")
+                    Prompt.ask("\nPress Enter to return")
+                    return
+                action = signal.action
+                conf = signal.confidence
+                sl = signal.stop_loss
+                tp = signal.take_profit_1
+                reasons = []
+                if hasattr(signal, 'supporting_signals') and signal.supporting_signals:
+                    reasons = signal.supporting_signals[:8]
+                elif hasattr(signal, 'primary_reason') and signal.primary_reason:
+                    reasons = [signal.primary_reason]
+            else:
+                console.print("[bold cyan]Running Swarm Intelligence (12 agents)...[/bold cyan]\n")
+                result = self.swarm.analyze(ticker, indicators, rounds=3)
+                action = result.get('action', 'HOLD')
+                conf = result.get('confidence', 0)
+                sl, tp = 0, 0
+                reasons = result.get('reasons', [])[:5]
+                breakdown = result.get('breakdown', {})
 
-                    exit_price = None
-                    reason = None
-                    if hit_sl:
-                        exit_price = position['sl']
-                        reason = 'SL'
-                    elif hit_tp:
-                        exit_price = position['tp']
-                        reason = 'TP'
+            # STEP 3: Display the BLIND prediction
+            color = "green" if action == "BUY" else ("red" if action == "SELL" else "yellow")
+            console.print(f"\n[bold]{'='*55}[/bold]")
+            console.print(f"[bold {color}]  BOT PREDICTION: {action} at ${last_price:.2f} ({conf:.0f}% confidence)[/bold {color}]")
+            if sl and tp:
+                console.print(f"[bold {color}]  Stop Loss: ${sl:.2f}  |  Take Profit: ${tp:.2f}[/bold {color}]")
+            console.print(f"[bold]{'='*55}[/bold]")
+            if reasons:
+                console.print(f"\n[bold]Reasoning:[/bold]")
+                for r in reasons:
+                    console.print(f"  - {r}")
+            if method == 'swarm' and breakdown:
+                console.print(f"\n  [green]BUY: {breakdown.get('buy',0):.1f}%[/green] | "
+                              f"[red]SELL: {breakdown.get('sell',0):.1f}%[/red] | "
+                              f"[yellow]HOLD: {breakdown.get('hold',0):.1f}%[/yellow]")
 
-                    if exit_price:
-                        direction = 1 if position['direction'] == 'BUY' else -1
-                        pnl = (exit_price - position['entry']) * position['shares'] * direction
-                        pnl -= 1.0  # commission
-                        equity += pnl
-                        peak_equity = max(peak_equity, equity)
-                        dd = (peak_equity - equity) / peak_equity * 100
-                        max_dd = max(max_dd, dd)
-                        trades.append({
-                            'entry_date': position['date'], 'exit_date': df.index[i + 1],
-                            'direction': position['direction'], 'entry': position['entry'],
-                            'exit': exit_price, 'shares': position['shares'],
-                            'pnl': pnl, 'reason': reason
-                        })
-                        position = None
+            # STEP 4: Ask user to reveal the future
+            console.print(f"\n[bold cyan]The bot has made its call. Now let's see what actually happened.[/bold cyan]")
+            horizon = Prompt.ask("How many days forward to check?", default="5")
+            horizon = int(horizon)
 
-                # Skip if already in position
-                if position is not None:
-                    continue
+            end_reveal = (datetime.strptime(cutoff_date, '%Y-%m-%d') + timedelta(days=horizon + 5)).strftime('%Y-%m-%d')
+            future_df = yf.download(ticker, start=cutoff_date, end=end_reveal, interval='1d', progress=False)
+            if future_df is None or future_df.empty:
+                console.print("[red]No future data available (cutoff too recent?)[/red]")
+                Prompt.ask("\nPress Enter to return")
+                return
+            if hasattr(future_df.columns, 'levels'):
+                future_df.columns = [c[0] if isinstance(c, tuple) else c for c in future_df.columns]
 
-                # Generate signal
-                try:
-                    indicators = TechnicalAnalyzer.calculate_indicators(window)
-                    if indicators is None:
-                        continue
-                    indicators.price = current_price
-                    indicators.close = current_price
-
-                    signal = self.analyzer._fallback_analysis(
-                        ticker, indicators, equity, risk_pct,
-                        desired_rrr=2.5, is_day_trading=False)
-
-                    if signal is None or signal.action == 'HOLD':
-                        continue
-                    if signal.confidence < 70:
-                        continue
-
-                    action = signal.action
-                    sl = signal.stop_loss
-                    tp = signal.take_profit_1
-
-                    # Validate SL/TP
-                    if action == 'BUY' and (sl >= next_open or tp <= next_open):
-                        continue
-                    if action == 'SELL' and (sl <= next_open or tp >= next_open):
-                        continue
-
-                    # Position sizing
-                    risk_dist = abs(next_open - sl)
-                    if risk_dist <= 0:
-                        continue
-                    risk_dollars = equity * risk_pct
-                    shares = int(risk_dollars / risk_dist)
-                    if shares < 1:
-                        continue
-
-                    # Slippage
-                    entry = next_open * (1.001 if action == 'BUY' else 0.999)
-
-                    position = {
-                        'date': df.index[i + 1], 'direction': action,
-                        'entry': entry, 'shares': shares, 'sl': sl, 'tp': tp
-                    }
-                except Exception:
-                    continue
-
-            # Close any open position at final close
-            if position is not None:
-                final_price = float(df['Close'].iloc[-1])
-                direction = 1 if position['direction'] == 'BUY' else -1
-                pnl = (final_price - position['entry']) * position['shares'] * direction
-                equity += pnl
-                trades.append({
-                    'entry_date': position['date'], 'exit_date': df.index[-1],
-                    'direction': position['direction'], 'entry': position['entry'],
-                    'exit': final_price, 'shares': position['shares'],
-                    'pnl': pnl, 'reason': 'EOD'
-                })
-
-            # Results
-            total = len(trades)
-            if total == 0:
-                console.print("[yellow]No trades generated. Try a longer period or lower confidence threshold.[/yellow]")
+            # Trim to horizon
+            future_df = future_df.head(horizon)
+            if future_df.empty:
+                console.print("[red]No trading days in that horizon[/red]")
                 Prompt.ask("\nPress Enter to return")
                 return
 
-            wins = [t for t in trades if t['pnl'] > 0]
-            losses = [t for t in trades if t['pnl'] <= 0]
-            win_rate = len(wins) / total * 100
-            total_pnl = equity - capital
-            avg_win = np.mean([t['pnl'] for t in wins]) if wins else 0
-            avg_loss = np.mean([t['pnl'] for t in losses]) if losses else 0
-            profit_factor = abs(sum(t['pnl'] for t in wins) / sum(t['pnl'] for t in losses)) if losses and sum(t['pnl'] for t in losses) != 0 else 0
+            future_close = float(future_df['Close'].iloc[-1])
+            future_high = float(future_df['High'].max())
+            future_low = float(future_df['Low'].min())
+            actual_change = (future_close - last_price) / last_price * 100
+            max_up = (future_high - last_price) / last_price * 100
+            max_down = (future_low - last_price) / last_price * 100
 
-            # Display
-            color = "green" if total_pnl >= 0 else "red"
-            console.print(f"\n[bold]{'='*50}[/bold]")
-            console.print(f"[bold]BACKTEST RESULTS: {ticker} ({period})[/bold]")
-            console.print(f"[bold]Method: {method.upper()} | Capital: ${capital:,.0f}[/bold]")
-            console.print(f"[bold]{'='*50}[/bold]\n")
+            # STEP 5: Score the prediction
+            correct = False
+            if action == 'BUY' and actual_change > 0:
+                correct = True
+            elif action == 'SELL' and actual_change < 0:
+                correct = True
+            elif action == 'HOLD' and abs(actual_change) < 1.5:
+                correct = True
 
-            console.print(f"  Total trades:    {total}")
-            console.print(f"  Win rate:        [{color}]{win_rate:.1f}%[/{color}]")
-            console.print(f"  Winners:         [green]{len(wins)}[/green]")
-            console.print(f"  Losers:          [red]{len(losses)}[/red]")
-            console.print(f"  Avg win:         [green]${avg_win:+,.2f}[/green]")
-            console.print(f"  Avg loss:        [red]${avg_loss:+,.2f}[/red]")
-            console.print(f"  Profit factor:   {profit_factor:.2f}")
-            console.print(f"  Max drawdown:    [red]{max_dd:.1f}%[/red]")
-            console.print(f"\n  [bold {color}]Total P&L: ${total_pnl:+,.2f} ({total_pnl/capital*100:+.2f}%)[/bold {color}]")
-            console.print(f"  [bold {color}]Final equity: ${equity:,.2f}[/bold {color}]")
+            # Check if SL/TP would have been hit
+            sl_hit = False
+            tp_hit = False
+            if sl and tp and action in ('BUY', 'SELL'):
+                if action == 'BUY':
+                    sl_hit = future_low <= sl
+                    tp_hit = future_high >= tp
+                else:
+                    sl_hit = future_high >= sl
+                    tp_hit = future_low <= tp
 
-            # Trade log
-            console.print(f"\n[bold]Recent trades:[/bold]")
+            # Display results
+            result_color = "green" if correct else "red"
+            console.print(f"\n[bold]{'='*55}[/bold]")
+            console.print(f"[bold]  WHAT ACTUALLY HAPPENED ({horizon} trading days):[/bold]")
+            console.print(f"[bold]{'='*55}[/bold]")
+            console.print(f"\n  Price at cutoff:  ${last_price:.2f}")
+            console.print(f"  Price after:      ${future_close:.2f}")
+            ch_color = "green" if actual_change > 0 else "red"
+            console.print(f"  Change:           [{ch_color}]{actual_change:+.2f}%[/{ch_color}]")
+            console.print(f"  Max upside:       [green]+{max_up:.2f}%[/green] (${future_high:.2f})")
+            console.print(f"  Max downside:     [red]{max_down:.2f}%[/red] (${future_low:.2f})")
+            if sl and tp:
+                console.print(f"\n  SL (${sl:.2f}):        {'[red]HIT[/red]' if sl_hit else '[green]NOT HIT[/green]'}")
+                console.print(f"  TP (${tp:.2f}):        {'[green]HIT[/green]' if tp_hit else '[yellow]NOT HIT[/yellow]'}")
+                if tp_hit and not sl_hit:
+                    console.print(f"  [bold green]Trade would have been PROFITABLE (TP hit before SL)[/bold green]")
+                elif sl_hit and not tp_hit:
+                    console.print(f"  [bold red]Trade would have LOST (SL hit before TP)[/bold red]")
+                elif tp_hit and sl_hit:
+                    # Check which hit first
+                    console.print(f"  [yellow]Both SL and TP were hit — depends on order of events[/yellow]")
+
+            console.print(f"\n  [bold {result_color}]VERDICT: {'CORRECT' if correct else 'WRONG'} — "
+                          f"bot said {action}, market went {actual_change:+.2f}%[/bold {result_color}]")
+
+            # Show future candles
+            console.print(f"\n[bold]Future candles (what the bot couldn't see):[/bold]")
             table = Table(box=box.SIMPLE)
             table.add_column("Date", style="dim")
-            table.add_column("Dir")
-            table.add_column("Entry", justify="right")
-            table.add_column("Exit", justify="right")
-            table.add_column("P&L", justify="right")
-            table.add_column("Reason")
-            for t in trades[-15:]:
-                p_color = "green" if t['pnl'] > 0 else "red"
-                d_color = "green" if t['direction'] == 'BUY' else "red"
+            table.add_column("Open", justify="right")
+            table.add_column("High", justify="right")
+            table.add_column("Low", justify="right")
+            table.add_column("Close", justify="right")
+            table.add_column("Change", justify="right")
+            for idx, row in future_df.iterrows():
+                day_change = (float(row['Close']) - last_price) / last_price * 100
+                dc_color = "green" if day_change > 0 else "red"
                 table.add_row(
-                    str(t['entry_date'].date()) if hasattr(t['entry_date'], 'date') else str(t['entry_date'])[:10],
-                    f"[{d_color}]{t['direction']}[/{d_color}]",
-                    f"${t['entry']:.2f}", f"${t['exit']:.2f}",
-                    f"[{p_color}]${t['pnl']:+,.2f}[/{p_color}]",
-                    t['reason']
+                    idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)[:10],
+                    f"${float(row['Open']):.2f}", f"${float(row['High']):.2f}",
+                    f"${float(row['Low']):.2f}", f"${float(row['Close']):.2f}",
+                    f"[{dc_color}]{day_change:+.2f}%[/{dc_color}]"
                 )
             console.print(table)
 
+            # Update swarm agents if swarm was used
+            if method == 'swarm' and action in ('BUY', 'SELL'):
+                self.swarm.record_outcome(ticker, action, correct)
+                console.print(f"\n[dim]Swarm agents updated: prediction was {'correct' if correct else 'wrong'}[/dim]")
+
         except Exception as e:
-            console.print(f"[red]Backtest error: {e}[/red]")
+            console.print(f"[red]Error: {e}[/red]")
             import traceback; traceback.print_exc()
 
         Prompt.ask("\nPress Enter to return")
