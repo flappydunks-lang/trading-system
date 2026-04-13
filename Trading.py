@@ -1737,7 +1737,6 @@ class TradingConfig:
         return configs[style]
 
 @dataclass
-@dataclass
 class AdvancedIndicators:
     """80+ Technical Indicators."""
     price: float
@@ -7247,23 +7246,24 @@ class AIAnalyzer:
             momentum_count = 0
             weights['momentum'] = 0.25
             
-            # RSI (14)
+            # RSI (14) — for BUY: oversold (RSI=30) = score 100, overbought (RSI=70) = score 0
+            #            for SELL: overbought (RSI=70) = score 100, oversold (RSI=30) = score 0
             if indicators.rsi_14:
                 if action == 'BUY':
-                    rsi_bullish = max(0, min(100, (indicators.rsi_14 - 30) * 1.67))  # 30-100 -> 0-100
+                    rsi_bullish = max(0, min(100, (70 - indicators.rsi_14) * 2.5))  # 70->0, 30->100
                     momentum_score += rsi_bullish
                 else:
-                    rsi_bearish = max(0, min(100, (70 - indicators.rsi_14) * 1.67))  # 0-70 -> 100-0
+                    rsi_bearish = max(0, min(100, (indicators.rsi_14 - 30) * 2.5))  # 30->0, 70->100
                     momentum_score += rsi_bearish
                 momentum_count += 1
-            
-            # RSI (7) - faster
+
+            # RSI (7) — same reversal logic, faster timeframe
             if indicators.rsi_7:
                 if action == 'BUY':
-                    rsi7_bullish = max(0, min(100, (indicators.rsi_7 - 40) * 2.0))
+                    rsi7_bullish = max(0, min(100, (60 - indicators.rsi_7) * 2.5))
                     momentum_score += rsi7_bullish
                 else:
-                    rsi7_bearish = max(0, min(100, (60 - indicators.rsi_7) * 2.0))
+                    rsi7_bearish = max(0, min(100, (indicators.rsi_7 - 40) * 2.5))
                     momentum_score += rsi7_bearish
                 momentum_count += 1
             
@@ -7355,10 +7355,9 @@ class AIAnalyzer:
                 volume_score += max(30, min(100, vol_score))  # Min 30 for any volume
                 volume_count += 1
             
-            # OBV trend
+            # OBV — neutral baseline (50), no directional bias without OBV history
             if indicators.obv:
-                # OBV should be rising for BUY, falling for SELL
-                volume_score += 75  # Assume healthy if available
+                volume_score += 50
                 volume_count += 1
             
             # MFI volume divergence
@@ -7391,13 +7390,14 @@ class AIAnalyzer:
             weights['structure'] = 0.10
             
             if market_structure and hasattr(market_structure, 'structure'):
-                if action == 'BUY' and 'uptrend' in str(market_structure.structure).lower():
+                struct_str = str(market_structure.structure).lower()
+                if action == 'BUY' and ('bullish' in struct_str or 'uptrend' in struct_str):
                     structure_score = 85
-                elif action == 'SELL' and 'downtrend' in str(market_structure.structure).lower():
+                elif action == 'SELL' and ('bearish' in struct_str or 'downtrend' in struct_str):
                     structure_score = 85
-                elif action == 'BUY' and 'downtrend' in str(market_structure.structure).lower():
+                elif action == 'BUY' and ('bearish' in struct_str or 'downtrend' in struct_str):
                     structure_score = 25
-                elif action == 'SELL' and 'uptrend' in str(market_structure.structure).lower():
+                elif action == 'SELL' and ('bullish' in struct_str or 'uptrend' in struct_str):
                     structure_score = 25
             
             scores['structure'] = structure_score
@@ -7415,15 +7415,16 @@ class AIAnalyzer:
             
             # ===== APPLY BIAS ADJUSTMENTS =====
             
-            # 1. Indicator Divergence Penalty (overconfidence bias)
-            # If too many indicators agree, reduce confidence (could be a trap)
+            # 1. Indicator Agreement Penalty
+            # Too much agreement (>85%) = possibly a trap, reduce slightly
+            # Too little agreement (<35%) = conflicting signals, reduce more
             agreeing_indicators = sum(1 for s in scores.values() if s > 70)
-            total_indicators = len(scores)
-            divergence = abs(agreeing_indicators / max(1, total_indicators) - 0.6)
-            if divergence < 0.1:  # Too unanimous
-                final_confidence *= 0.85
-            elif divergence > 0.3:  # Too much disagreement
-                final_confidence *= 0.90
+            total_indicators = max(1, len(scores))
+            agreement_ratio = agreeing_indicators / total_indicators
+            if agreement_ratio > 0.85:
+                final_confidence *= 0.92  # Mild skepticism on unanimity
+            elif agreement_ratio < 0.35:
+                final_confidence *= 0.85  # Low agreement = low conviction
             
             # 2. Volatility Adjustment (risk-adjusted confidence)
             if indicators.atr_percent and indicators.atr_percent > 2.5:
@@ -7547,11 +7548,20 @@ class AIAnalyzer:
         ai_confidence = min(95.0, max(0.0, ai_confidence))
         
         # IMPROVEMENT: Calculate comprehensive quantitative confidence from ALL indicators
-        # This weights trend, momentum, volatility, volume, and patterns with bias adjustments
         action_dir = analysis.get('action', 'HOLD')
-        comprehensive_confidence = self._calculate_comprehensive_confidence(
-            ticker, indicators, patterns, market_structure, analysis, action_dir
-        )
+        try:
+            # patterns and market_structure may not be available — use defaults
+            _patterns = getattr(self, '_last_patterns', None)
+            _mkt_struct = getattr(self, '_last_market_structure', None)
+            if _patterns is None:
+                _patterns = type('P', (), {'bullish_patterns': [], 'bearish_patterns': [], 'neutral_patterns': []})()
+            if _mkt_struct is None:
+                _mkt_struct = type('M', (), {'trend': 'RANGING', 'structure': 'RANGING', 'confidence': 50})()
+            comprehensive_confidence = self._calculate_comprehensive_confidence(
+                ticker, indicators, _patterns, _mkt_struct, analysis, action_dir
+            )
+        except Exception:
+            comprehensive_confidence = ai_confidence  # Fall back to AI-only
         
         # Blend AI confidence (50%) with comprehensive quantitative confidence (50%)
         # This ensures we use ALL data while respecting AI insights
