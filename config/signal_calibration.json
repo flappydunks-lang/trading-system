@@ -1,0 +1,97 @@
+{
+  "momentum_sell": {
+    "hits": 9,
+    "misses": 33,
+    "weight": 0.43
+  },
+  "other_sell": {
+    "hits": 27,
+    "misses": 130,
+    "weight": 0.34
+  },
+  "trend_sell": {
+    "hits": 30,
+    "misses": 151,
+    "weight": 0.33
+  },
+  "volatility_sell": {
+    "hits": 2,
+    "misses": 12,
+    "weight": 0.3
+  },
+  "divergence_sell": {
+    "hits": 2,
+    "misses": 9,
+    "weight": 0.36
+  },
+  "confluence_sell": {
+    "hits": 3,
+    "misses": 14,
+    "weight": 0.35
+  },
+  "trend_buy": {
+    "hits": 172,
+    "misses": 245,
+    "weight": 0.82
+  },
+  "volume_buy": {
+    "hits": 5,
+    "misses": 11,
+    "weight": 0.62
+  },
+  "momentum_buy": {
+    "hits": 54,
+    "misses": 72,
+    "weight": 0.86
+  },
+  "ichimoku_buy": {
+    "hits": 25,
+    "misses": 35,
+    "weight": 0.83
+  },
+  "other_buy": {
+    "hits": 160,
+    "misses": 242,
+    "weight": 0.8
+  },
+  "pattern_sell": {
+    "hits": 10,
+    "misses": 46,
+    "weight": 0.36
+  },
+  "ichimoku_sell": {
+    "hits": 4,
+    "misses": 18,
+    "weight": 0.36
+  },
+  "pattern_buy": {
+    "hits": 50,
+    "misses": 75,
+    "weight": 0.8
+  },
+  "confluence_buy": {
+    "hits": 21,
+    "misses": 42,
+    "weight": 0.67
+  },
+  "volatility_buy": {
+    "hits": 17,
+    "misses": 31,
+    "weight": 0.71
+  },
+  "divergence_buy": {
+    "hits": 10,
+    "misses": 12,
+    "weight": 0.91
+  },
+  "volume_sell": {
+    "hits": 0,
+    "misses": 1,
+    "weight": 1.0
+  },
+  "smart_money_buy": {
+    "hits": 1,
+    "misses": 2,
+    "weight": 1.0
+  }
+}

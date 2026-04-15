@@ -1159,31 +1159,6 @@ def page_settings(parent, app):
     ctk.CTkLabel(card3, text="IBKR: start TWS on port 7497 before connecting",
                   font=(FONT, 11), text_color=C["text3"]).pack(padx=16, pady=(0,14), anchor="w")
 
-    # Auto-Schedule
-    card4 = Card(f, title="Auto-Schedule (Trade Automatically)")
-    card4.pack(fill="x", padx=6, pady=6)
-    ctk.CTkLabel(card4, text="Bot starts at 9:25 AM and stops at 4:05 PM ET, Mon-Fri.\n"
-                 "Runs a full scan of your universe and executes trades via AutoTrader.",
-                  font=(FONT, 12), text_color=C["text2"], wraplength=500).pack(padx=16, pady=(4,8), anchor="w")
-
-    sched_row = ctk.CTkFrame(card4, fg_color="transparent")
-    sched_row.pack(fill="x", padx=16, pady=(0,14))
-
-    def _sched_enable():
-        import subprocess
-        r = subprocess.run([sys.executable, str(REPO / "gui" / "scheduler.py"), "enable"],
-                            capture_output=True, text=True)
-        messagebox.showinfo("Scheduler", r.stdout or r.stderr or "Done")
-
-    def _sched_disable():
-        import subprocess
-        r = subprocess.run([sys.executable, str(REPO / "gui" / "scheduler.py"), "disable"],
-                            capture_output=True, text=True)
-        messagebox.showinfo("Scheduler", r.stdout or r.stderr or "Done")
-
-    Btn(sched_row, text="Enable Auto-Trade", color=C["green"], width=150, command=_sched_enable).pack(side="left", padx=4)
-    Btn(sched_row, text="Disable Auto-Trade", color=C["red"], width=150, command=_sched_disable).pack(side="left", padx=4)
-
     return f
 
 

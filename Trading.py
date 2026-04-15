@@ -103,6 +103,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence IBKR "no real-time subscription, using delayed" spam (error codes 10089/10167).
+# These fire every time reqTickers() runs on a position — harmless but very noisy.
+class _IBKRSubscriptionNoiseFilter(logging.Filter):
+    # All benign IBKR subscription / farm-connection codes we want out of the terminal.
+    _SUPPRESSED_CODES = ('10089', '10090', '10091', '10167', '2104', '2106', '2158', '2108', '2119')
+    _SUPPRESSED_PHRASES = (
+        'Requested market data requires additional subscription',
+        'Requested market data is not subscribed',
+        'Part of requested market data is not subscribed',
+        'Part of requested market data requires additional subscription',
+        'market data farm connection',
+        'HMDS data farm connection',
+        'Sec-def data farm connection',
+        'Subscription-independent ticks are still active',
+    )
+    def filter(self, record):
+        msg = record.getMessage()
+        for phrase in self._SUPPRESSED_PHRASES:
+            if phrase in msg:
+                return False
+        for code in self._SUPPRESSED_CODES:
+            if f'Error {code}' in msg or f'Warning {code}' in msg:
+                return False
+        return True
+_noise_filter = _IBKRSubscriptionNoiseFilter()
+for _h in (file_handler, stream_handler):
+    _h.addFilter(_noise_filter)
+logging.getLogger('ib_insync').addFilter(_noise_filter)
+logging.getLogger('ib_insync.wrapper').addFilter(_noise_filter)
+logging.getLogger('ib_insync.client').addFilter(_noise_filter)
+
+# Console quiet mode: only ERROR and above go to the terminal.
+# File handler still captures everything at INFO level for debugging.
+stream_handler.setLevel(logging.ERROR)
+
 # ==========================================
 # JSON EXTRACTION UTILITY
 # ==========================================
@@ -190,7 +225,7 @@ def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
 
 MARKET_UNIVERSES = {
     "sp500_top50": [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "V", "UNH",
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "V", "UNH",
         "JNJ", "WMT", "JPM", "MA", "PG", "XOM", "HD", "CVX", "MRK", "ABBV",
         "LLY", "KO", "PEP", "AVGO", "COST", "ADBE", "MCD", "TMO", "CSCO", "ABT",
         "ACN", "CRM", "NKE", "DHR", "VZ", "CMCSA", "INTC", "NEE", "TXN", "PM",
@@ -216,8 +251,78 @@ MARKET_UNIVERSES = {
         "YM=F",  # Dow Jones E-mini
         "CL=F",  # Crude Oil
         "GC=F"   # Gold
-    ]
+    ],
+    # Full S&P 500 — scan every liquid large-cap the broker can trade.
+    "sp500": [
+        "AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","BRK-B","V","UNH","JNJ","WMT","JPM","MA",
+        "PG","XOM","HD","CVX","MRK","ABBV","LLY","KO","PEP","AVGO","COST","ADBE","MCD","TMO","CSCO",
+        "ABT","ACN","CRM","NKE","DHR","VZ","CMCSA","INTC","NEE","TXN","PM","WFC","UPS","HON","AMD",
+        "QCOM","ORCL","IBM","BA","GE","NFLX","SBUX","INTU","AMGN","LOW","CAT","GS","BLK","SPGI","PFE",
+        "AMT","AXP","RTX","BKNG","ISRG","DE","PLD","NOW","MS","ELV","LMT","MDT","T","TJX","SYK","C",
+        "ADP","VRTX","GILD","BSX","CB","ADI","SCHW","REGN","TMUS","MO","PANW","MDLZ","CI","PGR",
+        "ETN","SO","DIS","BMY","ZTS","AON","NOC","LRCX","DUK","ICE","KLAC","SHW","SLB","APD",
+        "EMR","EOG","CL","MCO","USB","EQIX","ITW","MAR","SNPS","CDNS","PNC","APH","HUM","CSX","MMM",
+        "PH","GD","MCK","F","COF","MPC","CMG","TGT","FCX","NXPI","PSA","ORLY","AZO","MSI","ADSK",
+        "AJG","PYPL","EW","HCA","NSC","AEP","PCAR","CARR","ROP","TT","WM","WELL","ANET","FTNT","SRE",
+        "KDP","HLT","MNST","TDG","TFC","TRV","DLR","CCI","PXD","D","AIG","AFL","CPRT","GM","MET",
+        "PSX","AMP","O","CTAS","GWW","COP","KMB","STZ","ALL","DHI","MSCI","PAYX","KR","CNC","VLO",
+        "EA","EBAY","HSY","EXC","IQV","ROST","CHTR","A","XEL","ENB","FAST","SMCI","OXY","TEL","CTVA",
+        "BKR","OKE","KMI","IDXX","CMI","HES","VRSK","URI","PWR","ON","HAL","ED","WMB","DD","CSGP",
+        "KHC","HIG","NUE","NEM","YUM","AVB","FICO","DG","LEN","OTIS","WCN","AEE","IT","RSG","APTV",
+        "BIIB","ODFL","WBA","EIX","GLW","CTSH","SYY","LYB","BAX","DVN","BF-B","CHRW","STT","NTAP",
+        "PRU","VICI","RMD","VMC","CAH","MLM","TRGP","AWK","FTV","KEYS","DXCM","MTD","EXR","ANSS",
+        "FE","EFX","WST","AMCR","ES","HRL","DLTR","CDW","ACGL","MKC","K","STE","MAA","TTWO","DPZ",
+        "TROW","CNP","WEC","DTE","WY","ETR","CTRA","EQR","FITB","TSCO","BALL","FANG","VTR","RJF",
+        "BR","PPG","WAB","HPQ","CINF","ULTA","DOV","LH","GPC","HBAN","ZBH","ROK","NTRS","PFG","MTB",
+        "CMS","STLD","IEX","PPL","AES","EXPD","PEG","LDOS","LNT","ATO","TSN","LUV","DOC","SBAC",
+        "VRSN","NVR","CBOE","EXPE","XYL","NDAQ","OMC","HOLX","HPE","LYV","WDC","CLX","CFG","STX",
+        "DRI","FDS","MAS","WAT","WRB","NI","IRM","SWKS","CMA","MOH","UAL","TER","EMN","GEN","VTRS",
+        "PNW","FOXA","AKAM","AVY","TXT","CPB","POOL","BG","FOX","TFX","APA","LKQ","EG","WRK","MKTX",
+        "TAP","EVRG","JKHY","PKG","JBHT","NWSA","HST","SJM","MRO","JNPR","KMX","DGX","L","BEN","IP",
+        "RHI","INCY","CAG","MGM","CHRD","UHS","UDR","BXP","WBD","REG","ZION","CE","TECH","ALGN",
+        "HSIC","AIZ","KIM","EQT","ALB","HRB","HAS","NWS","PAYC","BBY","CF","DAL","EPAM","SEDG","QRVO",
+        "SWK","WYNN","GPN","AOS","SCCO","RCL","AAL","ROL","IPG","BAH","WHR","PNR","ABMD","NCLH"
+    ],
+    # High-beta movers — names that actually travel enough intraday to hit +1R
+    # scale-out and beat the STALE/TIME-STOP thresholds the bot enforces.
+    "high_volatility": [
+        # Semis (cyclical, high-ATR)
+        "TSM", "ARM", "MRVL", "MU", "ASML", "LRCX", "KLAC", "AMAT", "ON", "ADI",
+        # AI / cloud / high-growth software
+        "PLTR", "SNOW", "NET", "DDOG", "MDB", "CRWD", "ZS", "S", "PANW", "NOW",
+        "COIN", "HOOD", "SQ", "SHOP",
+        # China ADRs (wide ATR, news-driven)
+        "BABA", "PDD", "JD", "NIO", "BIDU", "LI", "XPEV",
+        # EV / high-beta
+        "RIVN", "LCID", "ENPH", "FSLR",
+        # Biotech / volatile healthcare
+        "MRNA", "BIIB",
+        # High-volume retail traders' names
+        "GME", "RBLX", "U",
+    ],
+    # Low-beta dead weight to EXCLUDE from the scan — staples/utilities/telecom
+    # that barely move intraday and just consume cycle time + trigger STALE exits.
+    "_excluded_low_beta": [
+        "KO", "PEP", "PG", "MDLZ", "MO", "PM", "CL", "KMB", "HSY", "MCD",
+        "WMT", "COST",  # staples retail
+        "VZ", "CMCSA",  # telecom
+        "SO", "DUK", "NEE", "D", "AEP", "EXC", "XEL", "WEC", "ETR", "DTE", "ED", "PEG", "ES",  # utilities
+        "JNJ", "PFE", "BMY", "MRK",  # slow pharma
+        "MMM", "IBM",  # slow industrial/tech
+    ],
+    # Top 150 large-caps (minus dead weight) + high-volatility names.
+    "all": []  # populated below
 }
+# Build "all" from the top 150 tickers of sp500 (ordered by market weight),
+# minus the _excluded_low_beta set, then dedup in the volatile/specialty lists.
+_excluded = set(MARKET_UNIVERSES["_excluded_low_beta"])
+_top_filtered = [t for t in MARKET_UNIVERSES["sp500"][:150] if t not in _excluded]
+_all_stocks: list[str] = list(_top_filtered)
+for _k in ("tech_leaders", "ai_quantum", "mega_caps", "high_volatility"):
+    for _sym in MARKET_UNIVERSES.get(_k, []):
+        if _sym not in _all_stocks and _sym not in _excluded:
+            _all_stocks.append(_sym)
+MARKET_UNIVERSES["all"] = _all_stocks
 
 # ==========================================
 # USER AUTHENTICATION SYSTEM
@@ -2037,7 +2142,7 @@ class PolygonDataFetcher:
             params = {
                 'apiKey': api_key,
                 'adjusted': 'true',
-                'sort': 'asc',
+                'sort': 'desc',
                 'limit': limit
             }
             
@@ -2083,7 +2188,10 @@ class PolygonDataFetcher:
             
             # Select only required columns
             df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-            
+
+            # sort=desc gives newest first; re-sort ascending for downstream indicators
+            df = df.sort_index()
+
             logger.info(f"✓ Polygon.io: Fetched {len(df)} bars for {ticker}")
             return df
             
@@ -2584,9 +2692,13 @@ class DataManager:
     # lightweight recent-cache to avoid repeated network calls for 1m polling
     _recent_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
 
+    # Broker reference for data fetching — set by FinalAIQuantum.__init__ so IBKR
+    # (if connected) can be used as the primary real-time data source.
+    _broker = None
+
     @staticmethod
     def fetch_data(ticker: str, period: str, interval: str) -> Optional[pd.DataFrame]:
-        """Fetch market data with caching. Uses Polygon.io for day trading, yfinance for everything else."""
+        """Fetch market data with caching. Priority: IBKR (if TWS connected) → Polygon.io → yfinance."""
         import time
 
         logger.info(f"Fetching {ticker} data: period={period}, interval={interval}")
@@ -2602,6 +2714,18 @@ class DataManager:
         # DAY TRADING: Use Polygon.io for intraday intervals when enabled and suitable
         intraday_intervals = ['1m', '5m', '15m', '30m', '1h']
         if interval in intraday_intervals:
+            # Try IBKR first — real-time, no rate limits, already paid for
+            if not is_crypto and DataManager._broker is not None:
+                try:
+                    if DataManager._broker.is_ready() and hasattr(DataManager._broker, 'get_bars'):
+                        logger.info(f"📊 Trying IBKR for {interval} data (primary source)")
+                        ibkr_df = DataManager._broker.get_bars(ticker, period, interval)
+                        if ibkr_df is not None and not ibkr_df.empty and DataManager.validate_data(ibkr_df, interval=interval):
+                            return ibkr_df
+                        logger.info("IBKR data unavailable or stale, falling back to Polygon")
+                except Exception as e:
+                    logger.debug(f"IBKR data fetch error: {e}")
+
             # Determine whether to prefer Polygon
             prefer_polygon = True
             try:
@@ -8319,8 +8443,18 @@ class AIAnalyzer:
             if 'regime' in s: return 'regime'
             return 'other'
 
-        bull_score = sum(SIGNAL_WEIGHTS.get(_classify(s), 0.8) for s in bullish_signals)
-        bear_score = sum(SIGNAL_WEIGHTS.get(_classify(s), 0.8) for s in bearish_signals)
+        # Empirically-calibrated per-signal weights: scale each signal's static weight
+        # by the live accuracy it has shown on prior BUY/SELL trades of this ticker-class.
+        # get_weight returns 1.0 until 10+ outcomes are recorded, so behavior is identical
+        # on cold start and improves as live trades resolve.
+        bull_score = sum(
+            SIGNAL_WEIGHTS.get(_classify(s), 0.8) * _signal_calibrator.get_weight(s, 'BUY')
+            for s in bullish_signals
+        )
+        bear_score = sum(
+            SIGNAL_WEIGHTS.get(_classify(s), 0.8) * _signal_calibrator.get_weight(s, 'SELL')
+            for s in bearish_signals
+        )
         total_score = bull_score + bear_score
         score_diff = abs(bull_score - bear_score)
 
@@ -10013,6 +10147,9 @@ class BrokerInterface:
     def get_position(self, symbol: str) -> Optional[Dict[str, Any]]: return None
     def close_position(self, symbol: str) -> bool: return False
     def submit_bracket_order(self, symbol, qty, side, take_profit, stop_loss) -> Optional[Dict[str, Any]]: return None
+    def get_bars(self, symbol: str, period: str = '5d', interval: str = '1m') -> Optional[Any]: return None
+    def modify_stop_loss(self, symbol: str, new_stop: float) -> bool: return False
+    def close_partial(self, symbol: str, qty_to_close: float, new_stop: Optional[float] = None) -> bool: return False
 
     @staticmethod
     def _canonical_symbol(sym: str) -> str:
@@ -10042,20 +10179,30 @@ class IBKRTrader(BrokerInterface):
 
     def _connect(self):
         try:
-            import asyncio
+            import asyncio, random
             try: asyncio.get_event_loop()
             except RuntimeError: asyncio.set_event_loop(asyncio.new_event_loop())
             from ib_insync import IB
-            for cid in range(self._client_id, self._client_id + 5):
+            # Widen retry range — stale Trading.py windows can hold 5+ client IDs.
+            # Use a PID-derived starting point so concurrent launches don't collide on the same IDs.
+            base_cid = self._client_id + (os.getpid() % 100)
+            for cid in range(base_cid, base_cid + 50):
                 try:
                     ib = IB()
-                    ib.connect(host=self._host, port=self._port, clientId=cid, timeout=10, readonly=False)
-                    ib.sleep(0.5)
+                    ib.connect(host=self._host, port=self._port, clientId=cid, timeout=5, readonly=False)
+                    ib.sleep(1.0)  # Give TWS time to send "clientId in use" error if any
                     if ib.isConnected():
-                        self._ib = ib
-                        self._client_id = cid
-                        break
-                    ib.disconnect()
+                        # Verify the connection survived (not kicked by "clientId already in use")
+                        try:
+                            accts = ib.managedAccounts()
+                            if accts:
+                                self._ib = ib
+                                self._client_id = cid
+                                break
+                        except Exception:
+                            pass
+                    try: ib.disconnect()
+                    except Exception: pass
                 except Exception:
                     try: ib.disconnect()
                     except Exception: pass
@@ -10094,14 +10241,21 @@ class IBKRTrader(BrokerInterface):
         if not self._ensure(): return None
         try:
             summary = self._ib.accountSummary()
-            r = {'cash': 0.0, 'equity': 0.0, 'buying_power': 0.0, 'status': 'active'}
+            r = {
+                'cash': 0.0, 'equity': 0.0, 'buying_power': 0.0,
+                'excess_liquidity': 0.0, 'maint_margin': 0.0, 'cushion': 1.0,
+                'status': 'active',
+            }
             for item in summary:
-                if item.tag not in ('TotalCashValue', 'NetLiquidation', 'BuyingPower'): continue
+                tag = item.tag
                 try: val = float(item.value)
                 except (ValueError, TypeError): continue
-                if item.tag == 'TotalCashValue': r['cash'] = val
-                elif item.tag == 'NetLiquidation': r['equity'] = val
-                elif item.tag == 'BuyingPower': r['buying_power'] = val
+                if tag == 'TotalCashValue': r['cash'] = val
+                elif tag == 'NetLiquidation': r['equity'] = val
+                elif tag == 'BuyingPower': r['buying_power'] = val
+                elif tag == 'ExcessLiquidity': r['excess_liquidity'] = val
+                elif tag == 'MaintMarginReq': r['maint_margin'] = val
+                elif tag == 'Cushion': r['cushion'] = val
             return r
         except Exception as e:
             logger.warning(f"[IBKR] get_account: {e}")
@@ -10158,6 +10312,23 @@ class IBKRTrader(BrokerInterface):
             contract = self._make_contract(symbol)
             if not contract: return False
             self._ib.qualifyContracts(contract)
+
+            # Cancel any stale bracket children (TP/SL) for this symbol BEFORE
+            # submitting the close. Otherwise leftover resting orders cause
+            # "Your order was repriced so as not to cross a related resting order"
+            # warnings and can later execute against a zero position.
+            try:
+                for open_trade in self._ib.openTrades():
+                    try:
+                        if self._contract_matches(open_trade.contract, symbol) and \
+                           open_trade.orderStatus.status not in ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive'):
+                            self._ib.cancelOrder(open_trade.order)
+                    except Exception:
+                        continue
+                self._ib.sleep(0.5)  # brief wait so the cancels settle before the close
+            except Exception as e:
+                logger.debug(f"[IBKR] cancel bracket children for {symbol}: {e}")
+
             action = 'SELL' if pos['side'] == 'long' else 'BUY'
             order = MarketOrder(action, float(pos['qty']))
             order.tif = 'GTC' if self.is_crypto_symbol(symbol) else 'DAY'
@@ -10215,6 +10386,171 @@ class IBKRTrader(BrokerInterface):
         except Exception as e:
             logger.warning(f"[IBKR] submit_bracket_order {symbol}: {e}")
             import traceback; traceback.print_exc()
+            return None
+
+    @staticmethod
+    def _contract_matches(oc, sym_input: str) -> bool:
+        """Robust symbol match that tolerates IBKR's class-share conventions.
+        After qualifyContracts, BRK.B becomes contract.symbol='BRK' with
+        localSymbol='BRK B' — a naive equality check would miss it. Compare
+        the input against BOTH fields, normalized by stripping separators."""
+        try:
+            norm = lambda s: ''.join(ch for ch in str(s).upper() if ch.isalnum())
+            want = norm(sym_input)
+            return norm(getattr(oc, 'symbol', '')) == want or \
+                   norm(getattr(oc, 'localSymbol', '')) == want
+        except Exception:
+            return False
+
+    def modify_stop_loss(self, symbol: str, new_stop: float) -> bool:
+        """Push the trailing stop to IBKR so the broker enforces it even if this
+        process dies. Finds the resting StopOrder for this symbol and modifies
+        its aux price. Returns True on success. Idempotent — no-op if the new
+        stop is within 1c of the existing one."""
+        if not self._ensure(): return False
+        try:
+            new_aux = round(float(new_stop), 2)
+            for open_trade in self._ib.openTrades():
+                try:
+                    oc = open_trade.contract
+                    if not self._contract_matches(oc, symbol):
+                        continue
+                    o = open_trade.order
+                    # Only modify STP (and STP LMT); leave LMT TP and parent entries alone.
+                    if getattr(o, 'orderType', '') not in ('STP', 'STP LMT'):
+                        continue
+                    status = open_trade.orderStatus.status
+                    if status in ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive'):
+                        continue
+                    cur = float(getattr(o, 'auxPrice', 0) or 0)
+                    if abs(cur - new_aux) < 0.01:
+                        return True  # nothing to do
+                    o.auxPrice = new_aux
+                    # ib_insync: re-placing with the same orderId modifies in place
+                    self._ib.placeOrder(oc, o)
+                    self._ib.sleep(0.3)
+                    logger.info(f"[IBKR] trailing stop {symbol}: {cur:.2f} → {new_aux:.2f}")
+                    return True
+                except Exception:
+                    continue
+            return False
+        except Exception as e:
+            logger.debug(f"[IBKR] modify_stop_loss {symbol}: {e}")
+            return False
+
+    def close_partial(self, symbol: str, qty_to_close: float, new_stop: Optional[float] = None) -> bool:
+        """Scale-out helper: close `qty_to_close` shares of an existing position, then
+        (optionally) re-arm a protective stop for the remaining shares. Cancels the
+        current bracket children first so nothing executes against the reduced size."""
+        if not self._ensure(): return False
+        try:
+            from ib_insync import MarketOrder, StopOrder
+            pos = self.get_position(symbol)
+            if not pos: return False
+            remaining_qty = abs(float(pos.get('qty', 0) or 0)) - float(qty_to_close)
+            if remaining_qty <= 0:  # Nothing would remain — fall back to full close
+                return self.close_position(symbol)
+            contract = self._make_contract(symbol)
+            if not contract: return False
+            self._ib.qualifyContracts(contract)
+
+            for open_trade in self._ib.openTrades():
+                try:
+                    if not self._contract_matches(open_trade.contract, symbol):
+                        continue
+                    if open_trade.orderStatus.status in ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive'):
+                        continue
+                    # Skip parent entry limits (parentId == 0 AND order type LMT).
+                    # These are pending new-entry orders (e.g., a pyramid add still
+                    # waiting to fill) — cancelling them would silently nuke user
+                    # intent. Only bracket children (TP/SL) and stops should be
+                    # cancelled during a scale-out.
+                    o = open_trade.order
+                    if getattr(o, 'parentId', 0) == 0 and getattr(o, 'orderType', '') == 'LMT':
+                        continue
+                    self._ib.cancelOrder(o)
+                except Exception:
+                    continue
+            self._ib.sleep(0.5)
+
+            side_long = pos['side'] == 'long'
+            action = 'SELL' if side_long else 'BUY'
+            is_crypto = self.is_crypto_symbol(symbol)
+            partial_qty = float(qty_to_close) if is_crypto else int(qty_to_close)
+            if partial_qty <= 0: return False
+            partial = MarketOrder(action, partial_qty)
+            partial.tif = 'GTC' if is_crypto else 'DAY'
+            partial_trade = self._ib.placeOrder(contract, partial)
+            # Wait up to 3s for the partial market to fill so the new stop's
+            # qty actually matches what's left in the position. Falls through
+            # on timeout — the stop will still protect the intended remainder.
+            for _ in range(6):
+                self._ib.sleep(0.5)
+                try:
+                    if partial_trade.orderStatus.status in ('Filled', 'ApiCancelled', 'Cancelled', 'Inactive'):
+                        break
+                except Exception:
+                    break
+
+            if new_stop and new_stop > 0:
+                exit_action = 'SELL' if side_long else 'BUY'
+                rem_qty = float(remaining_qty) if is_crypto else int(remaining_qty)
+                sl_order = StopOrder(exit_action, rem_qty, round(float(new_stop), 2))
+                sl_order.orderId = self._ib.client.getReqId()
+                sl_order.tif = 'GTC'
+                self._ib.placeOrder(contract, sl_order)
+                self._ib.sleep(0.3)
+            return True
+        except Exception as e:
+            logger.warning(f"[IBKR] close_partial {symbol}: {e}")
+            return False
+
+    def get_bars(self, symbol: str, period: str = '5d', interval: str = '1m') -> Optional[pd.DataFrame]:
+        """Fetch historical OHLCV bars via IBKR reqHistoricalData.
+
+        Returns DataFrame with Open/High/Low/Close/Volume columns and datetime index
+        (matching yfinance/Polygon shape). Returns None on any failure so callers fall back.
+        """
+        if not self._ensure(): return None
+        if self.is_crypto_symbol(symbol): return None  # crypto stays on Coinbase WS
+        try:
+            interval_map = {
+                '1m': '1 min', '5m': '5 mins', '15m': '15 mins',
+                '30m': '30 mins', '1h': '1 hour', '1d': '1 day',
+                '1w': '1 week', '1wk': '1 week',
+            }
+            period_map = {
+                '1d': '1 D', '5d': '5 D', '10d': '10 D',
+                '1w': '1 W', '1mo': '1 M', '3mo': '3 M',
+                '6mo': '6 M', '1y': '1 Y', '2y': '2 Y', '5y': '5 Y',
+            }
+            bar_size = interval_map.get(interval)
+            if not bar_size: return None
+            duration = period_map.get(period, '5 D')
+
+            contract = self._make_contract(symbol)
+            if not contract: return None
+            self._ib.qualifyContracts(contract)
+
+            bars = self._ib.reqHistoricalData(
+                contract, endDateTime='', durationStr=duration,
+                barSizeSetting=bar_size, whatToShow='TRADES',
+                useRTH=False, formatDate=1, keepUpToDate=False)
+            if not bars: return None
+
+            df = pd.DataFrame([{
+                'Open': float(b.open), 'High': float(b.high), 'Low': float(b.low),
+                'Close': float(b.close), 'Volume': float(b.volume or 0),
+                'timestamp': pd.to_datetime(b.date),
+            } for b in bars])
+            if df.empty: return None
+            df.set_index('timestamp', inplace=True)
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+            df['Volume'] = df['Volume'].replace(0, 1)
+            logger.info(f"✓ IBKR: Fetched {len(df)} {interval} bars for {symbol}")
+            return df
+        except Exception as e:
+            logger.debug(f"[IBKR] get_bars {symbol}: {e}")
             return None
 
     def batch_fetch_prices(self, symbols):
@@ -10298,6 +10634,24 @@ class AutoTrader:
     @property
     def bp_safety_pct(self): return float((self.bot.config or {}).get('auto_trade_bp_safety_pct', 50.0))
 
+    def _live_equity(self) -> float:
+        """Real account equity from the broker. Falls back to config if broker is unavailable.
+
+        Using live equity (not a hardcoded config number) ensures position sizing matches
+        the account that will actually execute the trade.
+        """
+        try:
+            broker = getattr(self.bot, 'broker', None)
+            if broker and broker.is_ready():
+                acct = broker.get_account()
+                if acct:
+                    eq = float(acct.get('equity', 0) or 0)
+                    if eq > 0:
+                        return eq
+        except Exception:
+            pass
+        return float((self.bot.config or {}).get('account_size', 100000))
+
     def _load_state(self):
         try:
             p = Path('logs/auto_trader_state.json')
@@ -10309,7 +10663,10 @@ class AutoTrader:
                 self.open_positions = data.get('open_positions', {})
                 self.enabled = data.get('enabled', False)
                 self.mode = data.get('mode', 'paper')
-        except Exception: pass
+        except Exception as e:
+            # Never silently drop open positions — log loudly so the user sees it.
+            logger.error(f"AutoTrader._load_state failed: {e}. Open positions may be lost.")
+            console.print(f"[bold red]⚠ AutoTrader state load failed: {e}[/bold red]")
         self._maybe_reset_day()
 
     def _save_state(self):
@@ -10333,6 +10690,13 @@ class AutoTrader:
             self.daily_trades = 0
             self.daily_pnl_pct = 0.0
             self.last_reset_date = today
+            # New session → overnight holds get another shot at the +1R scale-out
+            # rule. Without this, reconciled positions stay flagged scaled_out=True
+            # forever and day-2+ runners never take partial profits.
+            for _sym, _pos in self.open_positions.items():
+                if _pos.get('scaled_out'):
+                    _pos['scaled_out'] = False
+                    _pos['breakeven_applied'] = False  # re-arm breakeven trailing on the fresh session
             self._save_state()
 
     def record_open(self, ticker, pos_data):
@@ -10361,9 +10725,14 @@ class AutoTrader:
     def update_trailing_stops(self, price_fn):
         """Update trailing stops on all open positions. Call each scan cycle.
 
+        Pushes the new stop to the broker via modify_stop_loss so protection
+        stays active even if this process dies mid-session.
+
         Args:
             price_fn: callable(ticker) -> float, returns current price
         """
+        broker = getattr(self.bot, 'broker', None)
+        broker_ready = bool(broker and broker.is_ready()) and self.mode == 'live'
         for ticker, pos in list(self.open_positions.items()):
             try:
                 price = price_fn(ticker)
@@ -10375,7 +10744,14 @@ class AutoTrader:
                 new_sl = float(pos.get('sl', 0))
                 if new_sl != old_sl:
                     self._save_state()
-                    console.print(f"[cyan]  Trailing stop {ticker}: ${old_sl:.2f} -> ${new_sl:.2f}[/cyan]")
+                    pushed = False
+                    if broker_ready:
+                        try:
+                            pushed = broker.modify_stop_loss(ticker, new_sl)
+                        except Exception:
+                            pushed = False
+                    tag = "broker" if pushed else "local"
+                    console.print(f"[cyan]  Trailing stop {ticker}: ${old_sl:.2f} -> ${new_sl:.2f} ({tag})[/cyan]")
             except Exception:
                 continue
 
@@ -10400,8 +10776,26 @@ class AutoTrader:
         """Size and execute a trade. Returns position dict or None."""
         reason = self._gate(confidence=confidence)
         if reason:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): {reason}[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):{reason}[/yellow]")
             return None
+
+        # MARGIN CUSHION GATE — refuse new trades if IBKR's cushion is too thin.
+        # Cushion = ExcessLiquidity / NetLiquidation. IBKR sends warnings near 0.10
+        # and force-liquidates near 0. We require ≥30% by default.
+        try:
+            broker = getattr(self.bot, 'broker', None)
+            if broker and broker.is_ready() and self.mode == 'live':
+                acct = broker.get_account() or {}
+                eq = float(acct.get('equity', 0) or 0)
+                excess = float(acct.get('excess_liquidity', 0) or 0)
+                if eq > 0:
+                    cushion_ratio = excess / eq
+                    min_cushion = float((self.bot.config or {}).get('auto_trade_min_cushion', 0.30))
+                    if cushion_ratio < min_cushion:
+                        console.print(f"[red]AutoTrader skipped ({ticker}): margin cushion {cushion_ratio*100:.1f}% < {min_cushion*100:.0f}% min — close positions to free margin[/red]")
+                        return None
+        except Exception:
+            pass
 
         action = "LONG" if str(side).upper() in ("BUY", "LONG") else "SHORT"
         is_crypto = BrokerInterface.is_crypto_symbol(ticker)
@@ -10412,46 +10806,52 @@ class AutoTrader:
 
         # 0. Position limit check
         if len(self.open_positions) >= self.max_open_positions:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): max positions ({self.max_open_positions})[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):max positions ({self.max_open_positions})[/yellow]")
             return None
 
         # 1. Session timing: block entries during low-quality sessions
         session_ok, session_reason, session_name = SessionTimer.should_trade(is_crypto)
         if not session_ok:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): {session_reason}[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):{session_reason}[/yellow]")
             return None
-        # Apply session confidence multiplier
+        # Apply session confidence multiplier (clamp to 99 — shouldn't read >100%).
         session_mult = SessionTimer.confidence_multiplier()
-        confidence = confidence * session_mult
+        confidence = min(99.0, confidence * session_mult)
 
         # 2. Earnings calendar: block entries near earnings
         earn_ok, earn_reason, earn_days = EarningsCalendar.is_safe_to_trade(ticker, min_days=2)
         if not earn_ok:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): {earn_reason}[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):{earn_reason}[/yellow]")
             return None
 
         # 3. Correlation filter: block overexposure to same sector
         corr_ok, corr_reason = CorrelationFilter.check_exposure(
-            ticker, self.open_positions, max_same_sector=2)
+            ticker, self.open_positions, max_same_sector=9999)
         if not corr_ok:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): {corr_reason}[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):{corr_reason}[/yellow]")
             return None
 
         # Re-check confidence after session multiplier
         if confidence < self.min_confidence:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): confidence {confidence:.0f}% after session adjustment[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):confidence {confidence:.0f}% after session adjustment[/yellow]")
             return None
 
-        account = float((self.bot.config or {}).get('account_size', 100000))
+        account = self._live_equity()
         entry_f, sl_f, tp_f = float(entry), float(stop_loss), float(take_profit)
         if entry_f <= 0: return None
 
-        # Enforce minimum stop distance (1.2% for day trading)
-        min_stop_pct = 1.2
+        # ATR-based stop sizing. 1.5× ATR is the standard pro rule — wide enough
+        # to survive normal noise, tight enough to cap the loss. Falls back to a
+        # 1.2% floor for low-ATR names so we never size into a razor-thin stop.
+        atr_hint = kwargs.get('atr')
+        atr_val = float(atr_hint) if atr_hint and atr_hint > 0 else 0.0
+        atr_risk = atr_val * 1.5 if atr_val > 0 else 0.0
+        floor_risk = entry_f * 0.012  # 1.2% safety floor
+        target_risk = max(atr_risk, floor_risk)
+
         per_share_risk = abs(entry_f - sl_f)
-        floor_risk = entry_f * (min_stop_pct / 100.0)
-        if per_share_risk < floor_risk:
-            per_share_risk = floor_risk
+        if per_share_risk <= 0 or per_share_risk < target_risk:
+            per_share_risk = target_risk
             if action == "LONG":
                 sl_f = entry_f - per_share_risk
                 tp_f = entry_f + per_share_risk * 2.5  # 2.5:1 R:R
@@ -10475,7 +10875,7 @@ class AutoTrader:
         max_total = account * (self.max_total_exposure_pct / 100.0)
         remaining = max(0, max_total - existing)
         if remaining <= 0:
-            console.print(f"[yellow]AutoTrader skipped ({ticker}): exposure cap reached[/yellow]")
+            console.print(f"[yellow]AutoTrader skipped ({ticker}):exposure cap reached[/yellow]")
             return None
         exposure_qty = remaining / entry_f
 
@@ -10495,12 +10895,12 @@ class AutoTrader:
         if is_crypto:
             position_size = round(max(final_qty, 0.0), 6)
             if position_size * entry_f < 10:
-                console.print(f"[yellow]AutoTrader skipped ({ticker}): crypto notional ${position_size*entry_f:.2f} below $10 min[/yellow]")
+                console.print(f"[yellow]AutoTrader skipped ({ticker}):crypto notional ${position_size*entry_f:.2f} below $10 min[/yellow]")
                 return None
         else:
             position_size = max(0, int(final_qty))
             if position_size < 1:
-                console.print(f"[yellow]AutoTrader skipped ({ticker}): position size < 1 share (risk too wide or account too small)[/yellow]")
+                console.print(f"[yellow]AutoTrader skipped ({ticker}):position size < 1 share (risk too wide or account too small)[/yellow]")
                 return None
 
         broker_order_id = None
@@ -10548,7 +10948,8 @@ class AutoTrader:
                   'position_side': action, 'position_size': position_size,
                   'channel': channel, 'broker_order_id': broker_order_id, 'is_crypto': is_crypto,
                   'signals_fired': kwargs.get('supporting', []) or [],
-                  'atr': abs(entry_f - sl_f) / 1.2,  # Approximate ATR from SL distance
+                  # Prefer real ATR passed from caller; fall back to SL-distance proxy
+                  'atr': float(kwargs['atr']) if kwargs.get('atr') else abs(entry_f - sl_f) / 1.2,
                   'session': SessionTimer.get_session()}
 
         # Telegram notification
@@ -10562,6 +10963,22 @@ class AutoTrader:
 
         console.print(f"[bold green]AutoTrader {action} {ticker}: {position_size} @ ${entry_f:.2f} "
                       f"SL ${sl_f:.2f} TP ${tp_f:.2f} ({channel})[/bold green]")
+
+        # Persist the new position to state so trailing stops, portfolio review,
+        # and EOD close logic all see it on the next cycle.
+        pos_side = 'LONG' if action == 'LONG' else 'SHORT'
+        self.record_open(ticker, {
+            'side': pos_side,
+            'entry': entry_f,
+            'qty': position_size,
+            'sl': sl_f,
+            'tp': tp_f,
+            'opened': datetime.now().isoformat(),
+            'broker_order_id': broker_order_id,
+            'atr': result['atr'],
+            'signals_fired': result['signals_fired'],
+            'entry_confidence': float(confidence),  # for confidence-based swap decisions
+        })
         return result
 
 
@@ -10580,17 +10997,19 @@ class FinalAIQuantum:
         self.scanner = None
         self.paper_trading = PaperTradingManager()
         self.broker = self._init_broker()
+        DataManager._broker = self.broker  # Enable IBKR as primary data source when TWS connected
         self.auto_trader = AutoTrader(self)
         self.swarm = SwarmIntelligence()
         self.current_user = None
 
     @staticmethod
     def _init_broker() -> BrokerInterface:
-        choice = os.getenv('BROKER', 'alpaca').strip().lower()
+        # Default to IBKR — AlpacaTrader was removed in an earlier refactor.
+        choice = os.getenv('BROKER', 'ibkr').strip().lower()
         if choice in ('ibkr', 'ib', 'interactive'):
             print("[*] Broker: IBKR (Interactive Brokers)")
             return IBKRTrader()
-        return BrokerInterface()  # Stub if no broker configured
+        return BrokerInterface()  # Stub if explicitly disabled
     
     def _validate_and_setup_api_keys(self):
         """Check for required API keys and prompt user to enter them if missing."""
@@ -11211,12 +11630,13 @@ class FinalAIQuantum:
             console.print("23. 🏆 Swarm Leaderboard")
             console.print("24. 📊 Backtester (TA/Swarm/Quant)")
             console.print("25. 🎯 Deep Scan (run ALL analysis on a watchlist)")
+            console.print("26. 🤖 Auto-Trader (hands-off, runs until you stop it)")
             console.print("\n[bold]🔷 SYSTEM[/bold]")
             console.print("18. 👥 User Management")
             console.print("19. ⚙️  Settings")
             console.print("20. 🚪 Exit\n")
 
-            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 26)], default="1")
+            choice = Prompt.ask("Select", choices=[str(i) for i in range(1, 27)], default="1")
 
             if choice == "1":
                 self.analyze_ticker()
@@ -11273,6 +11693,784 @@ class FinalAIQuantum:
                 self.run_backtest()
             elif choice == "25":
                 self._deep_scan()
+            elif choice == "26":
+                self._start_auto_trader()
+
+    def _start_auto_trader(self):
+        """Hands-off live auto-trader. Loops scans until user hits Ctrl+C."""
+        DisplayManager.show_header()
+        console.print("[bold cyan]🤖 AUTO-TRADER — Hands-off Mode[/bold cyan]\n")
+
+        mode = self.config.get('auto_trade_mode', 'paper')
+        interval = int(self.config.get('auto_trade_scan_interval', 60))
+        universe_key = self.config.get('auto_trade_universe', 'all')
+        tickers = list(MARKET_UNIVERSES.get(universe_key) or MARKET_UNIVERSES.get('all', ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN']))
+        min_conf = float(self.auto_trader.min_confidence)
+        rrr = float(self.config.get('default_rrr', 2.5))
+        # Pull real equity from the broker so sizing matches the account that will execute the trade.
+        account_size = self.auto_trader._live_equity()
+
+        broker = getattr(self, 'broker', None)
+        broker_ready = bool(broker and broker.is_ready())
+        equity_source = "broker" if broker_ready and account_size != float(self.config.get('account_size', 100000)) else "config"
+
+        console.print(f"[bold]Mode:[/bold] [{'red' if mode == 'live' else 'yellow'}]{mode.upper()}[/{'red' if mode == 'live' else 'yellow'}]")
+        console.print(f"[bold]Universe:[/bold] {universe_key} ({len(tickers)} tickers)")
+        console.print(f"[bold]Min confidence:[/bold] {min_conf:.0f}%  |  [bold]Scan interval:[/bold] {interval}s")
+        console.print(f"[bold]Account:[/bold] ${account_size:,.0f} ({equity_source})  |  [bold]Risk/trade:[/bold] {self.auto_trader.risk_pct}%")
+        console.print(f"[bold]Broker:[/bold] {'CONNECTED' if broker_ready else 'NOT CONNECTED — trades will be stubbed'}\n")
+
+        if mode == 'live':
+            confirm = Prompt.ask("[red bold]LIVE mode will place REAL orders. Continue?[/red bold]",
+                                 choices=["y", "n"], default="n")
+            if confirm != "y":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
+
+        self.auto_trader.enabled = True
+        self.auto_trader.mode = mode
+        self.auto_trader._save_state()
+
+        # Snapshot starting equity so we can measure daily drawdown against it.
+        starting_equity = account_size
+        max_loss_pct = float(self.config.get('auto_trade_max_daily_loss_pct', 5.0))
+        console.print(f"\n[bold green]✓ Auto-Trader ON.[/bold green] Press [bold]Ctrl+C[/bold] to stop.")
+        console.print(f"[dim]End-of-day closeout at 15:55 ET (all open positions flattened via market order).[/dim]")
+        console.print(f"[dim]Daily loss kill-switch: -{max_loss_pct:.1f}% from starting equity ${starting_equity:,.0f}.[/dim]\n")
+
+        def _daily_drawdown_hit() -> bool:
+            """True if current equity has dropped >= max_loss_pct below starting equity."""
+            try:
+                eq = self.auto_trader._live_equity()
+                drawdown_pct = (starting_equity - eq) / starting_equity * 100 if starting_equity > 0 else 0
+                if drawdown_pct >= max_loss_pct:
+                    console.print(f"[bold red]🛑 Daily loss kill-switch triggered: {drawdown_pct:.2f}% drawdown (${eq - starting_equity:+,.0f}).[/bold red]")
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _near_market_close() -> bool:
+            try:
+                from zoneinfo import ZoneInfo
+                et = datetime.now(ZoneInfo('America/New_York'))
+                if et.weekday() >= 5:  # weekend
+                    return False
+                minutes = et.hour * 60 + et.minute
+                return 955 <= minutes < 960  # 15:55–16:00 ET
+            except Exception:
+                return False
+
+        # Rolling buffer of closes for the 5-minute Telegram summary.
+        closes_this_period: list = []
+        # Session-wide accumulators so every 5-min message shows the day total,
+        # not just the last window. These outlive the closes_this_period clear.
+        session_closes: dict = {'wins': 0, 'losses': 0, 'total_pnl': 0.0, 'count': 0}
+
+        def _record_close(c: dict):
+            """Persist a close record (ticker/side/entry/exit/qty/pnl/reason) to
+            logs/trade_closes.jsonl so `daily_pnl.py` can aggregate per-day
+            performance later, and append to the current 5-min buffer."""
+            try:
+                Path('logs').mkdir(exist_ok=True)
+                with open('logs/trade_closes.jsonl', 'a') as f:
+                    f.write(json.dumps({
+                        'time': datetime.now().isoformat(),
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        **c,
+                    }) + '\n')
+            except Exception as e:
+                logger.debug(f"trade_closes.jsonl append failed: {e}")
+            closes_this_period.append(c)
+
+        def _try_swap_in(ticker, side, entry, sl, tp, conf, supporting, atr) -> bool:
+            """High-confidence signal got blocked — free up capital by closing the worst
+            open position (largest unrealized loss %), then retry the trade.
+
+            Only swaps if:
+              - A broker position exists
+              - The worst position is actually losing (uPnL% < -0.5%)
+              - New signal is on a DIFFERENT ticker (no self-swap)
+              - Effective confidence (after session multiplier) will clear min_conf —
+                otherwise the retry would skip and we'd close a position for nothing.
+            """
+            broker = getattr(self, 'broker', None)
+            if not broker or not broker.is_ready():
+                return False
+            # Preflight: will execute() actually accept this trade after session adjustment?
+            try:
+                sess_mult = SessionTimer.confidence_multiplier()
+                if conf * sess_mult < min_conf:
+                    return False
+            except Exception:
+                pass
+            try:
+                positions = [p for p in broker.list_positions()
+                             if abs(float(p.get('qty', 0))) > 0 and p.get('symbol') != ticker]
+                if not positions:
+                    return False
+
+                # Rank candidates: prefer position with LOWEST entry confidence (weakest conviction).
+                # Fall back to worst unrealized P&L% when entry_confidence missing.
+                def _score(p):
+                    sym_ = p.get('symbol')
+                    tracked = self.auto_trader.open_positions.get(sym_, {})
+                    entry_conf = float(tracked.get('entry_confidence', 100.0) or 100.0)
+                    upnl_pct = float(p.get('unrealized_plpc', 0) or 0)
+                    # Lower confidence first, ties broken by worse P&L %
+                    return (entry_conf, upnl_pct)
+
+                worst = min(positions, key=_score)
+                sym = worst['symbol']
+                tracked = self.auto_trader.open_positions.get(sym, {})
+                worst_entry_conf = float(tracked.get('entry_confidence', 100.0) or 100.0)
+                worst_pct = float(worst.get('unrealized_plpc', 0) or 0)
+
+                # Only swap if the new signal is meaningfully stronger than the worst position's
+                # entry confidence (5% buffer avoids churn on near-ties).
+                if conf < worst_entry_conf + 5.0:
+                    return False
+
+                # And don't close a big winner just because its entry conf was low — require
+                # the worst position to be at most barely profitable.
+                if worst_pct > 0.005:  # more than 0.5% in profit → leave alone
+                    return False
+
+                side_worst = 'LONG' if worst.get('side') == 'long' else 'SHORT'
+                entry_worst = float(worst.get('avg_entry_price', 0) or 0)
+                qty_worst = abs(float(worst.get('qty', 0) or 0))
+                upnl = float(worst.get('unrealized_pl', 0) or 0)
+                if not broker.close_position(sym):
+                    return False
+                self.auto_trader.record_close(sym, was_profitable=(upnl > 0))
+                _record_close({
+                    'ticker': sym, 'side': side_worst, 'entry': entry_worst,
+                    'exit': entry_worst + (upnl / qty_worst if qty_worst else 0) * (1 if side_worst == 'LONG' else -1),
+                    'qty': qty_worst, 'pnl': upnl, 'reason': f'SWAP→{ticker}',
+                })
+                console.print(f"[bold blue]  ⇄ SWAP: closed {sym} (conf {worst_entry_conf:.0f}%, {upnl:+,.2f}) for {ticker} (conf {conf:.0f}%)[/bold blue]")
+                time.sleep(1)  # let broker settle
+
+                # Retry the new trade
+                result = self.auto_trader.execute(
+                    ticker, side, entry, sl, tp, conf,
+                    supporting=supporting, atr=atr)
+                return bool(result)
+            except Exception as e:
+                console.print(f"[dim red]  swap failed: {e}[/dim red]")
+                return False
+
+        def _review_open_positions(account_size: float, rrr: float, min_conf: float) -> set:
+            """Re-analyze every BROKER position (not just state-file ones). Close on reversal,
+            pyramid on strong-continuation. Returns the set of symbols reviewed."""
+            reviewed: set = set()
+            broker = getattr(self, 'broker', None)
+            if not broker or not broker.is_ready():
+                return reviewed
+            try:
+                broker_positions = broker.list_positions()
+            except Exception as e:
+                console.print(f"[dim red]  review: could not fetch broker positions: {e}[/dim red]")
+                return reviewed
+
+            # Drop ghost entries: positions in state that the broker no longer holds
+            # (SL hit overnight, manual close in TWS, etc.). Without this, trailing
+            # updates would fire forever against a zero-qty symbol.
+            live_syms = {p['symbol'] for p in broker_positions if float(p.get('qty', 0)) != 0}
+            ghosts = [s for s in list(self.auto_trader.open_positions.keys()) if s not in live_syms]
+            for _ghost in ghosts:
+                self.auto_trader.open_positions.pop(_ghost, None)
+                console.print(f"[dim]  🧹 state cleanup: {_ghost} no longer at broker — removing from tracker[/dim]")
+            if ghosts:
+                self.auto_trader._save_state()
+
+            for bp in broker_positions:
+                sym = bp['symbol']
+                if float(bp.get('qty', 0)) == 0:
+                    continue
+                # Prefer state-file entry (has SL/TP, watermarks, entry_confidence).
+                # If missing, register an entry now so watermark/confidence tracking persists
+                # across cycles for PULLBACK/LOSS-CUT/SWAP logic.
+                if sym not in self.auto_trader.open_positions:
+                    side_bp = 'LONG' if bp.get('side') == 'long' else 'SHORT'
+                    entry_bp = float(bp.get('avg_entry_price', 0) or 0)
+                    qty_bp = abs(float(bp.get('qty', 0) or 0))
+                    self.auto_trader.open_positions[sym] = {
+                        'side': side_bp,
+                        'entry': entry_bp,
+                        'qty': qty_bp,
+                        'sl': entry_bp * (0.988 if side_bp == 'LONG' else 1.012),
+                        'tp': entry_bp * (1.03 if side_bp == 'LONG' else 0.97),
+                        'opened': datetime.now().isoformat(),
+                        'broker_order_id': None,
+                        'high_watermark': entry_bp,
+                        'low_watermark': entry_bp,
+                        'breakeven_applied': False,
+                        'initial_sl': entry_bp * (0.988 if side_bp == 'LONG' else 1.012),
+                        'entry_confidence': 70.0,  # unknown — assume moderate so swap can still target it
+                        'signals_fired': [],
+                        # If state was lost and this position was previously scaled,
+                        # we can't reliably know — err on the side of assuming it was
+                        # (no double-scale). Users re-entering fresh positions can
+                        # flip this manually in logs/auto_trader_state.json.
+                        'scaled_out': True,
+                    }
+                    self.auto_trader._save_state()
+                pos = self.auto_trader.open_positions[sym]
+                reviewed.add(sym)
+                try:
+                    df = DataManager.fetch_data(sym, '5d', '1m')
+                    if df is None or df.empty:
+                        continue
+                    indicators = TechnicalAnalyzer.calculate_indicators(df)
+                    if indicators is None:
+                        continue
+                    indicators.price = float(df['Close'].iloc[-1])
+                    indicators.close = indicators.price
+
+                    signal = self.analyzer._fallback_analysis(
+                        sym, indicators, account_size, 0.01, rrr, is_day_trading=True)
+                    if not signal:
+                        continue
+
+                    pos_side = pos.get('side', 'LONG')
+                    sig_action = signal.action
+                    sig_conf = float(getattr(signal, 'confidence', 0) or 0)
+
+                    # REVERSAL → close on opposite signal at or above min_conf
+                    reverse = (
+                        (pos_side == 'LONG' and sig_action == 'SELL' and sig_conf >= min_conf) or
+                        (pos_side == 'SHORT' and sig_action == 'BUY' and sig_conf >= min_conf)
+                    )
+                    if reverse:
+                        ok = broker.close_position(sym)
+                        if ok:
+                            entry = float(pos.get('entry', 0) or 0)
+                            qty = abs(float(pos.get('qty', 0) or 0))
+                            exit_px = indicators.price
+                            pnl = (exit_px - entry) * qty if pos_side == 'LONG' else (entry - exit_px) * qty
+                            profitable = pnl > 0
+                            self.auto_trader.record_close(sym, was_profitable=profitable)
+                            _record_close({
+                                'ticker': sym, 'side': pos_side, 'entry': entry,
+                                'exit': exit_px, 'qty': qty, 'pnl': pnl, 'reason': 'REVERSAL',
+                            })
+                            console.print(f"[magenta]  ↩ REVERSAL close {sym} ({pos_side}) on {sig_action} {sig_conf:.0f}% — P&L ${pnl:+,.2f}[/magenta]")
+                        else:
+                            console.print(f"[red]  Failed to close {sym} on reversal[/red]")
+                        continue
+
+                    # PROFIT-LOCK on signal exhaustion: if already in profit AND the
+                    # same-direction signal has weakened below min_conf, take the gain.
+                    entry = float(pos.get('entry', 0) or 0)
+                    if entry > 0:
+                        current_price = indicators.price
+                        pnl_pct = ((current_price - entry) / entry) if pos_side == 'LONG' else ((entry - current_price) / entry)
+                        same_dir_strong = (
+                            (pos_side == 'LONG' and sig_action == 'BUY' and sig_conf >= min_conf) or
+                            (pos_side == 'SHORT' and sig_action == 'SELL' and sig_conf >= min_conf)
+                        )
+
+                        # SCALE-OUT: at +1R profit, take half off the table and move
+                        # the stop on the remainder to entry. Classic pro rule —
+                        # locks in a win even if the runner gives everything back,
+                        # while leaving capital to capture a bigger move.
+                        initial_sl_px = float(pos.get('initial_sl', 0) or 0)
+                        one_r_px = abs(entry - initial_sl_px) if initial_sl_px > 0 else entry * 0.012
+                        one_r_pct_dynamic = one_r_px / entry if entry > 0 else 0.012
+                        already_scaled = bool(pos.get('scaled_out', False))
+                        if (not already_scaled) and pnl_pct >= one_r_pct_dynamic and one_r_pct_dynamic > 0:
+                            try:
+                                qty_total = abs(float(pos.get('qty', 0) or 0))
+                                is_crypto_sym = BrokerInterface.is_crypto_symbol(sym)
+                                half_qty = round(qty_total * 0.5, 6) if is_crypto_sym else int(qty_total * 0.5)
+                                if half_qty and half_qty < qty_total:
+                                    ok = broker.close_partial(sym, half_qty, new_stop=entry)
+                                    if ok:
+                                        # Update tracked qty + mark scaled, move SL to entry (breakeven)
+                                        pos['qty'] = qty_total - half_qty
+                                        pos['sl'] = entry
+                                        pos['breakeven_applied'] = True
+                                        pos['scaled_out'] = True
+                                        partial_pnl = (current_price - entry) * half_qty if pos_side == 'LONG' else (entry - current_price) * half_qty
+                                        self.auto_trader._save_state()
+                                        _record_close({
+                                            'ticker': sym, 'side': pos_side, 'entry': entry,
+                                            'exit': current_price, 'qty': half_qty, 'pnl': partial_pnl,
+                                            'reason': 'SCALE-OUT',
+                                        })
+                                        console.print(f"[bold cyan]  ⚖️  SCALE-OUT {sym} ({pos_side}) +{pnl_pct*100:.2f}% — closed {half_qty} (half), realized ${partial_pnl:+,.2f}, SL→entry on remainder[/bold cyan]")
+                                        # Skip the rest of the exit ladder this cycle —
+                                        # let the runner ride at breakeven. Next cycle's
+                                        # PULLBACK / trailing-stop will manage it.
+                                        continue
+                                    else:
+                                        logger.debug(f"scale-out close_partial returned False for {sym}")
+                            except Exception as e:
+                                logger.debug(f"scale-out {sym}: {e}")
+                        if pnl_pct >= 0.005 and not same_dir_strong:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'PROFIT-LOCK',
+                                })
+                                console.print(f"[green]  💰 PROFIT-LOCK {sym} ({pos_side}) — signal faded, locked ${pnl:+,.2f} ({pnl_pct*100:+.2f}%)[/green]")
+                            continue
+
+                        # PULLBACK CLOSE: track peak unrealized gain and close if we've given back ≥ 50%.
+                        # Catches winners that stall below TP and start reversing while signal is still strong.
+                        if pos_side == 'LONG':
+                            peak_price = max(float(pos.get('high_watermark', entry) or entry), current_price)
+                            pos['high_watermark'] = peak_price
+                            peak_pnl_pct = (peak_price - entry) / entry
+                        else:
+                            peak_price = min(float(pos.get('low_watermark', entry) or entry), current_price)
+                            pos['low_watermark'] = peak_price
+                            peak_pnl_pct = (entry - peak_price) / entry
+
+                        # Only trigger if the position had meaningful profit at peak (≥0.5%)
+                        # AND has given back at least half.
+                        if peak_pnl_pct >= 0.005 and pnl_pct < peak_pnl_pct * 0.5:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'PULLBACK',
+                                })
+                                console.print(f"[cyan]  📉 PULLBACK close {sym} ({pos_side}) — peak {peak_pnl_pct*100:.2f}% gave back to {pnl_pct*100:+.2f}%, locked ${pnl:+,.2f}[/cyan]")
+                            continue
+
+                        # LOSS-CUT on thesis breakdown: position is underwater AND the signal
+                        # that justified the trade has faded below min_conf. Don't wait for the
+                        # hard stop — exit early and redeploy capital somewhere better.
+                        # Requires at least -0.3% loss so we don't churn on tiny noise.
+                        if pnl_pct <= -0.003 and not same_dir_strong:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'LOSS-CUT',
+                                })
+                                console.print(f"[yellow]  ✂️  LOSS-CUT {sym} ({pos_side}) — signal faded, cut loss at {pnl_pct*100:+.2f}%, realized ${pnl:+,.2f}[/yellow]")
+                            continue
+
+                        # VIRTUAL BREAKEVEN: classic pro rule. Once the position has
+                        # reached +1R profit, treat entry as the new floor. If price drops
+                        # back to entry ± 0.1R, close — preserve gains, prevent round-trip.
+                        # 1R = initial stop distance = 1.2% of entry.
+                        one_r_pct = 0.012
+                        if peak_pnl_pct >= one_r_pct and pnl_pct <= one_r_pct * 0.1:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'BREAKEVEN',
+                                })
+                                console.print(f"[blue]  🛡️  BREAKEVEN {sym} ({pos_side}) — peaked +{peak_pnl_pct*100:.2f}%, retraced to {pnl_pct*100:+.2f}%, locked ${pnl:+,.2f}[/blue]")
+                            continue
+
+                        # Compute age once for both time-based rules below.
+                        try:
+                            opened_dt = datetime.fromisoformat(pos.get('opened', ''))
+                            age_minutes = (datetime.now() - opened_dt).total_seconds() / 60.0
+                        except Exception:
+                            age_minutes = 0
+
+                        # TIME-STOP-15: pro rule — "if it's not working in 15 minutes, it's
+                        # not going to work." If the trade hasn't shown ≥0.3% in our favor
+                        # within 15 min, exit and free the capital.
+                        if 15 <= age_minutes < 30 and pnl_pct < 0.003:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'TIME-STOP-15',
+                                })
+                                console.print(f"[dim yellow]  ⏱  TIME-STOP-15 {sym} ({pos_side}) — {age_minutes:.0f}min in, no follow-through ({pnl_pct*100:+.2f}%)[/dim yellow]")
+                            continue
+
+                        # STALE close: position has been open for ≥30 minutes and is
+                        # essentially flat (|P&L| < 0.3%). Capital is sitting idle —
+                        # release it for more active setups.
+                        if age_minutes >= 30 and abs(pnl_pct) < 0.003:
+                            ok = broker.close_position(sym)
+                            if ok:
+                                qty = abs(float(pos.get('qty', 0) or 0))
+                                pnl = (current_price - entry) * qty if pos_side == 'LONG' else (entry - current_price) * qty
+                                self.auto_trader.record_close(sym, was_profitable=pnl > 0)
+                                _record_close({
+                                    'ticker': sym, 'side': pos_side, 'entry': entry,
+                                    'exit': current_price, 'qty': qty, 'pnl': pnl, 'reason': 'STALE',
+                                })
+                                console.print(f"[dim cyan]  ⏳ STALE close {sym} ({pos_side}) — {age_minutes:.0f}min flat at {pnl_pct*100:+.2f}%, freed capital[/dim cyan]")
+                            continue
+
+                        # Persist updated watermark so next cycle remembers the peak.
+                        self.auto_trader._save_state()
+
+                    # PYRAMID — pro rule "add only to winners". Conditions:
+                    #   1. Position must already be in profit ≥0.5% (don't average down)
+                    #   2. Same-direction signal still strong (≥ min_conf + 10)
+                    #   3. New signal confidence at least as high as the original entry
+                    #      confidence (we're adding, not diluting conviction)
+                    #   4. Notional headroom in the per-position cap
+                    entry_conf_existing = float(pos.get('entry_confidence', 70.0) or 70.0)
+                    current_notional = abs(float(pos.get('qty', 0) or 0)) * float(pos.get('entry', 0) or 0)
+                    max_notional = account_size * (self.auto_trader.max_notional_pct / 100.0)
+                    room_left = max_notional - current_notional
+                    pyramid = (
+                        pnl_pct >= 0.005 and                               # winner only
+                        sig_conf >= entry_conf_existing and                # not diluting conviction
+                        room_left > account_size * 0.05 and                # ≥5% headroom
+                        ((pos_side == 'LONG' and sig_action == 'BUY' and sig_conf >= min_conf + 10) or
+                         (pos_side == 'SHORT' and sig_action == 'SELL' and sig_conf >= min_conf + 10))
+                    )
+                    if pyramid:
+                        result = self.auto_trader.execute(
+                            sym, sig_action, indicators.price,
+                            signal.stop_loss, signal.take_profit_1, sig_conf,
+                            supporting=getattr(signal, 'supporting_signals', []),
+                            atr=getattr(indicators, 'atr', None))
+                        if result:
+                            console.print(f"[cyan]  ➕ PYRAMID {sym} ({pos_side}) +{pnl_pct*100:.2f}% on {sig_action} {sig_conf:.0f}% (orig conf {entry_conf_existing:.0f}%)[/cyan]")
+                except Exception as e:
+                    console.print(f"[dim red]  review {sym}: {e}[/dim red]")
+            return reviewed
+
+        def _close_all_open_positions():
+            """Submit market-order closeouts for EVERY broker position — source of truth,
+            not the state file (which could be out of sync with manual TWS trades)."""
+            broker = getattr(self, 'broker', None)
+            if not broker or not broker.is_ready():
+                console.print("[red]EOD closeout skipped — broker not connected.[/red]")
+                return
+            try:
+                broker_positions = broker.list_positions()
+            except Exception as e:
+                console.print(f"[red]EOD: could not fetch broker positions: {e}[/red]")
+                broker_positions = []
+            symbols = [p['symbol'] for p in broker_positions if float(p.get('qty', 0)) != 0]
+            if not symbols:
+                console.print("[dim]EOD: no open positions to close.[/dim]")
+                return
+            console.print(f"[bold yellow]⏰ EOD: closing {len(symbols)} broker position(s)...[/bold yellow]")
+            # Snapshot broker positions for size/entry (source of truth) before close
+            bpos_by_sym = {p['symbol']: p for p in broker_positions}
+            for sym in symbols:
+                try:
+                    bp = bpos_by_sym.get(sym, {})
+                    qty = abs(float(bp.get('qty', 0) or 0))
+                    entry = float(bp.get('avg_entry_price', 0) or 0)
+                    side = 'LONG' if bp.get('side') == 'long' else 'SHORT'
+                    # Approximate exit at broker's last quote if possible
+                    exit_px = entry  # fallback
+                    try:
+                        price_now = DataManager.get_realtime_price(sym)
+                        if price_now and price_now > 0:
+                            exit_px = float(price_now)
+                    except Exception:
+                        pass
+                    ok = broker.close_position(sym)
+                    if ok:
+                        pnl = (exit_px - entry) * qty if side == 'LONG' else (entry - exit_px) * qty
+                        profitable = pnl > 0
+                        self.auto_trader.record_close(sym, was_profitable=profitable)
+                        _record_close({
+                            'ticker': sym, 'side': side, 'entry': entry,
+                            'exit': exit_px, 'qty': qty, 'pnl': pnl, 'reason': 'EOD',
+                        })
+                        console.print(f"[green]  ✓ Closed {sym} — P&L ${pnl:+,.2f}[/green]")
+                    else:
+                        console.print(f"[red]  ✗ Failed to close {sym} (no position or broker error)[/red]")
+                except Exception as e:
+                    console.print(f"[red]  ✗ Error closing {sym}: {e}[/red]")
+
+        cycle = 0
+        last_summary_t = time.time()
+        SUMMARY_EVERY = 300  # 5 minutes
+
+        def _send_summary():
+            """Push a 5-minute summary to Telegram: window closes, window P&L,
+            session-wide win-rate %, and total $ made/lost so far today."""
+            notifier = getattr(self, 'notifier', None)
+            if not notifier:
+                return
+            try:
+                # Roll this window's closes into the session totals BEFORE sending
+                # so the win-rate and total reflect the current state.
+                for c in closes_this_period:
+                    session_closes['count'] += 1
+                    session_closes['total_pnl'] += float(c['pnl'])
+                    if float(c['pnl']) > 0:
+                        session_closes['wins'] += 1
+                    elif float(c['pnl']) < 0:
+                        session_closes['losses'] += 1
+                    # pnl == 0 counts toward neither (breakeven)
+
+                window_pnl = sum(c['pnl'] for c in closes_this_period)
+                decided = session_closes['wins'] + session_closes['losses']
+                win_rate = (session_closes['wins'] / decided * 100) if decided > 0 else 0.0
+                session_total = session_closes['total_pnl']
+                session_emoji = "📈" if session_total >= 0 else "📉"
+
+                lines = ["📊 Auto-Trader 5-min Summary"]
+
+                if closes_this_period:
+                    lines.append(f"Closed this window: {len(closes_this_period)}")
+                    for c in closes_this_period:
+                        tag = "🟢" if c['pnl'] > 0 else ("🔴" if c['pnl'] < 0 else "⚪")
+                        lines.append(f"{tag} {c['side']} {c['ticker']} ({c['reason']}): ${c['pnl']:+,.2f}")
+                    lines.append(f"Window P&L: ${window_pnl:+,.2f}")
+                else:
+                    lines.append("No closes in the last 5 minutes.")
+
+                # Session-wide stats (always shown)
+                lines.append("─" * 22)
+                lines.append(f"Session closes: {session_closes['count']}  |  "
+                             f"W {session_closes['wins']} / L {session_closes['losses']}")
+                lines.append(f"Win rate: {win_rate:.1f}%")
+                lines.append(f"{session_emoji} Session P&L: ${session_total:+,.2f}")
+
+                # Live account snapshot
+                try:
+                    b = getattr(self, 'broker', None)
+                    if b and b.is_ready():
+                        acct = b.get_account() or {}
+                        eq = float(acct.get('equity', 0) or 0)
+                        open_n = len([p for p in (b.list_positions() or []) if abs(float(p.get('qty', 0))) > 0])
+                        lines.append(f"Open: {open_n}  |  Equity: ${eq:,.0f}")
+                except Exception:
+                    pass
+
+                notifier.send("\n".join(lines))
+            except Exception as e:
+                console.print(f"[dim red]Summary send failed: {e}[/dim red]")
+
+        def _send_eod_summary():
+            """Rich end-of-day wrap. Rolls the final window into session totals
+            and pushes a breakdown: entries/closes counts, win rate, day P&L,
+            % return vs starting equity, best/worst trade, exit-reason breakdown,
+            and final account equity."""
+            notifier = getattr(self, 'notifier', None)
+            if not notifier:
+                return
+            try:
+                # Make sure the final window's closes are absorbed into the totals.
+                for c in closes_this_period:
+                    session_closes['count'] += 1
+                    session_closes['total_pnl'] += float(c['pnl'])
+                    if float(c['pnl']) > 0:
+                        session_closes['wins'] += 1
+                    elif float(c['pnl']) < 0:
+                        session_closes['losses'] += 1
+
+                decided = session_closes['wins'] + session_closes['losses']
+                win_rate = (session_closes['wins'] / decided * 100) if decided > 0 else 0.0
+                session_total = session_closes['total_pnl']
+
+                # Pull the full day from the persistent log for best/worst and
+                # reason breakdown — more accurate than in-memory window.
+                today = datetime.now().strftime('%Y-%m-%d')
+                day_closes = []
+                try:
+                    p = Path('logs/trade_closes.jsonl')
+                    if p.exists():
+                        with open(p) as f:
+                            for line in f:
+                                try:
+                                    rec = json.loads(line.strip())
+                                    if rec.get('date') == today:
+                                        day_closes.append(rec)
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+
+                best_trade = max(day_closes, key=lambda c: float(c.get('pnl', 0))) if day_closes else None
+                worst_trade = min(day_closes, key=lambda c: float(c.get('pnl', 0))) if day_closes else None
+
+                reason_tally: dict = {}
+                for c in day_closes:
+                    r = c.get('reason', 'UNK')
+                    reason_tally.setdefault(r, [0, 0.0])
+                    reason_tally[r][0] += 1
+                    reason_tally[r][1] += float(c.get('pnl', 0))
+
+                # Current equity + return vs starting equity
+                eq_now = starting_equity
+                try:
+                    b = getattr(self, 'broker', None)
+                    if b and b.is_ready():
+                        acct = b.get_account() or {}
+                        eq_now = float(acct.get('equity', eq_now) or eq_now)
+                except Exception:
+                    pass
+                day_return_pct = ((eq_now - starting_equity) / starting_equity * 100) if starting_equity else 0.0
+                tag = "📈" if session_total >= 0 else "📉"
+
+                lines = [
+                    "🔔 END OF DAY SUMMARY",
+                    f"Date: {today}",
+                    "─" * 24,
+                    f"Trades opened: {self.auto_trader.daily_trades}",
+                    f"Trades closed: {session_closes['count']}",
+                    f"Wins / Losses: {session_closes['wins']}W / {session_closes['losses']}L",
+                    f"Win rate: {win_rate:.1f}%",
+                    f"{tag} Realized P&L: ${session_total:+,.2f}  ({day_return_pct:+.2f}%)",
+                ]
+                if best_trade:
+                    lines.append(f"🟢 Best: {best_trade.get('ticker','?')} ({best_trade.get('reason','?')}) ${float(best_trade.get('pnl',0)):+,.2f}")
+                if worst_trade:
+                    lines.append(f"🔴 Worst: {worst_trade.get('ticker','?')} ({worst_trade.get('reason','?')}) ${float(worst_trade.get('pnl',0)):+,.2f}")
+                if reason_tally:
+                    lines.append("─" * 24)
+                    lines.append("By exit reason:")
+                    # Sort by total P&L desc so the winners appear first
+                    for r, (cnt, pnl) in sorted(reason_tally.items(), key=lambda kv: -kv[1][1]):
+                        lines.append(f"  {r}: {cnt} × (${pnl:+,.2f})")
+                lines.append("─" * 24)
+                lines.append(f"Start equity: ${starting_equity:,.0f}")
+                lines.append(f"End equity:   ${eq_now:,.0f}")
+
+                notifier.send("\n".join(lines))
+            except Exception as e:
+                console.print(f"[dim red]EOD summary send failed: {e}[/dim red]")
+
+        try:
+            while True:
+                # 5-minute Telegram summary
+                if time.time() - last_summary_t >= SUMMARY_EVERY:
+                    _send_summary()
+                    closes_this_period.clear()
+                    last_summary_t = time.time()
+
+                # EOD checkpoint — close everything, send final summary, exit.
+                if _near_market_close():
+                    _close_all_open_positions()
+                    _send_eod_summary()
+                    console.print("[bold yellow]Market close — auto-trader stopping for the day.[/bold yellow]")
+                    break
+
+                # Daily loss kill-switch — flatten and stop to prevent bleeding further.
+                if _daily_drawdown_hit():
+                    _close_all_open_positions()
+                    _send_eod_summary()
+                    try:
+                        notifier = getattr(self, 'notifier', None)
+                        if notifier:
+                            notifier.send(f"🛑 Auto-Trader STOPPED — daily loss cap ({max_loss_pct:.1f}%) hit. All positions flattened.")
+                    except Exception:
+                        pass
+                    break
+
+                cycle += 1
+                cycle_start = time.time()
+                console.print(f"[cyan]── Cycle {cycle} @ {datetime.now().strftime('%H:%M:%S')} — scanning {len(tickers)} tickers ──[/cyan]")
+
+                # Portfolio review FIRST — decide close/pyramid/hold on every open position.
+                account_size = self.auto_trader._live_equity()
+                _review_open_positions(account_size, rrr, min_conf)
+
+                trades_this_cycle = 0
+                scanned = 0
+                for i, ticker in enumerate(tickers):
+                    # Abort the ticker loop early if market close hits mid-cycle.
+                    if i % 20 == 0 and _near_market_close():
+                        break
+                    try:
+                        # Re-check live equity each trade so sizing tracks account P&L and new deposits.
+                        account_size = self.auto_trader._live_equity()
+                        df = DataManager.fetch_data(ticker, '5d', '1m')
+                        if df is None or df.empty:
+                            continue
+                        indicators = TechnicalAnalyzer.calculate_indicators(df)
+                        if indicators is None:
+                            continue
+                        indicators.price = float(df['Close'].iloc[-1])
+                        indicators.close = indicators.price
+                        scanned += 1
+
+                        signal = self.analyzer._fallback_analysis(
+                            ticker, indicators, account_size, 0.01, rrr, is_day_trading=True)
+                        if signal and signal.action in ('BUY', 'SELL') and signal.confidence >= min_conf:
+                            # MULTI-TIMEFRAME CONFIRMATION: require the 5-minute signal
+                            # to agree, OR let very-high-conf 1m signals through alone.
+                            # Keeps us from fading a larger-timeframe trend.
+                            mtf_ok = True
+                            if signal.confidence < 85:
+                                try:
+                                    df5 = DataManager.fetch_data(ticker, '5d', '5m')
+                                    if df5 is not None and not df5.empty:
+                                        ind5 = TechnicalAnalyzer.calculate_indicators(df5)
+                                        if ind5 is not None:
+                                            ind5.price = float(df5['Close'].iloc[-1])
+                                            ind5.close = ind5.price
+                                            sig5 = self.analyzer._fallback_analysis(
+                                                ticker, ind5, account_size, 0.01, rrr, is_day_trading=True)
+                                            if sig5 and sig5.action == signal.action:
+                                                mtf_ok = True
+                                            elif sig5 and sig5.action in ('BUY', 'SELL'):
+                                                # 5m actively pointing the OTHER way — block.
+                                                mtf_ok = False
+                                            # sig5 HOLD = neutral, let 1m through
+                                except Exception:
+                                    pass  # fall back to 1m-only on any 5m error
+                            if not mtf_ok:
+                                console.print(f"[dim yellow]  {ticker}: 1m {signal.action} {signal.confidence:.0f}% blocked — 5m disagrees[/dim yellow]")
+                                continue
+                            result = self.auto_trader.execute(
+                                ticker, signal.action, indicators.price,
+                                signal.stop_loss, signal.take_profit_1, signal.confidence,
+                                supporting=getattr(signal, 'supporting_signals', []),
+                                atr=getattr(indicators, 'atr', None))
+                            if result:
+                                trades_this_cycle += 1
+                            elif signal.confidence >= 75:
+                                # SWAP: high-conf signal got blocked (likely exposure/BP cap).
+                                # Close the worst-performing open position to make room.
+                                if _try_swap_in(
+                                    ticker, signal.action, indicators.price,
+                                    signal.stop_loss, signal.take_profit_1, signal.confidence,
+                                    getattr(signal, 'supporting_signals', []),
+                                    getattr(indicators, 'atr', None)):
+                                    trades_this_cycle += 1
+                    except Exception as e:
+                        console.print(f"[dim red]  {ticker}: {e}[/dim red]")
+                        continue
+
+                try:
+                    self.auto_trader.update_trailing_stops(lambda t: DataManager.get_realtime_price(t))
+                except Exception as e:
+                    console.print(f"[dim red]  trailing-stops: {e}[/dim red]")
+
+                elapsed = time.time() - cycle_start
+                sleep_for = max(0, interval - elapsed)
+                console.print(f"[dim]  cycle done — scanned {scanned}/{len(tickers)}, {trades_this_cycle} trade(s) placed, {self.auto_trader.daily_trades}/{self.auto_trader.max_daily} today, elapsed {elapsed:.0f}s, sleeping {sleep_for:.0f}s[/dim]\n")
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⏸  Stopping auto-trader...[/yellow]")
+        finally:
+            self.auto_trader.enabled = False
+            self.auto_trader._save_state()
+            console.print(f"[bold]Auto-Trader OFF.[/bold] Total trades placed: {self.auto_trader.daily_trades}")
+            Prompt.ask("\nPress Enter to return to menu")
 
     def _deep_scan(self):
         """Run every analysis tool on a list of tickers and rank the best trades."""
@@ -11565,7 +12763,8 @@ class FinalAIQuantum:
                 if signal:
                     result = self.auto_trader.execute(
                         ticker, action, indicators.price,
-                        signal.stop_loss, signal.take_profit_1, conf)
+                        signal.stop_loss, signal.take_profit_1, conf,
+                        atr=getattr(indicators, 'atr', None))
                     if result:
                         console.print(f"[bold green]Trade executed: {action} {ticker}[/bold green]")
                     else:
@@ -24359,6 +25558,12 @@ if __name__ == "__main__":
         try:
             app = FinalAIQuantum()
             app.config = ConfigurationManager.load_config()
+            app.api_key = app.config.get('anthropic_api_key', '')
+            DataManager._broker = app.broker  # IBKR as primary data source when TWS connected
+            try:
+                app.analyzer = AIAnalyzer(app.api_key)
+            except Exception:
+                app.analyzer = AIAnalyzer("")
             app.auto_trader.enabled = True
             app.auto_trader.mode = app.config.get('auto_trade_mode', 'paper')
             # Run a single deep scan cycle
@@ -24386,7 +25591,8 @@ if __name__ == "__main__":
                         result = app.auto_trader.execute(
                             ticker, signal.action, indicators.price,
                             signal.stop_loss, signal.take_profit_1, signal.confidence,
-                            supporting=getattr(signal, 'supporting_signals', []))
+                            supporting=getattr(signal, 'supporting_signals', []),
+                            atr=getattr(indicators, 'atr', None))
                         if result:
                             print(f"  [TRADE] {signal.action} {ticker} @ ${indicators.price:.2f} ({signal.confidence:.0f}%)")
                 except Exception as e:
